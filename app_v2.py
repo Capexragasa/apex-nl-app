@@ -1624,160 +1624,6 @@ def leer_pdf(archivo):
         filas_validas = filas_obra
     else:
         filas_validas = filas_tabla
-
-    # ======================================================
-    # QUINTO INTENTO: PRESUPUESTOS DE OBRA TIPO OPUS/NEODATA
-    # CON NÚMEROS "PARTIDOS" POR EL PDF
-    # ======================================================
-    #
-    # Algunos PDFs digitales sí contienen texto, pero pdfplumber extrae
-    # visualmente un número como 250.00 de esta manera:
-    #
-    #     "2 50.00"
-    #
-    # y un importe como 11,832.50 como:
-    #
-    #     "$ 1 1,832.50"
-    #
-    # Eso hacía fallar los patrones anteriores aunque el PDF NO estuviera
-    # escaneado. Este fallback solo corre si los métodos anteriores no
-    # encontraron partidas, por lo que no altera los formatos que ya
-    # funcionaban.
-    if not filas_validas:
-
-        filas_presupuesto_obra = []
-
-        patron_presupuesto_obra = re.compile(
-            r"^(AR\s+\S+)\s+"                         # clave base
-            r"(.+?)\s+"                              # descripción en la línea
-            r"\b(M2|M3|ML|M|PZA|PZAS|SERVICIO|LOTE|KG|TON)\b"
-            r"\s+([0-9][0-9 ,]*\.\d{2}|-)"          # cantidad (tolera espacios)
-            r"\s+\$\s*([0-9][0-9 ,]*\.\d{2}|-)"     # precio unitario
-            r"\s+\$\s*([0-9][0-9 ,]*\.\d{2}|-)\s*$",# importe
-            flags=re.IGNORECASE,
-        )
-
-        patrones_ruido_presupuesto = [
-            re.compile(r"^Descripci[oó]ndel proyecto:", re.IGNORECASE),
-            re.compile(r"^Descripci[oó]n del proyecto:", re.IGNORECASE),
-            re.compile(r"^Cliente:", re.IGNORECASE),
-            re.compile(r"^Fecha:", re.IGNORECASE),
-            re.compile(r"^PRESUPUESTO$", re.IGNORECASE),
-            re.compile(
-                r"^Clave\s+Descripci[oó]n\s+Unidad\s+Cantidad\s+P\s+Unitario\s+Importe$",
-                re.IGNORECASE,
-            ),
-            # Títulos/subtotales de sección, por ejemplo:
-            # "CIMENTACION $ 364,129.47"
-            re.compile(
-                r"^[A-ZÁÉÍÓÚÑ0-9 /().,\-]+"
-                r"\s+\$\s*[0-9][0-9 ,]*\.\d{2}$",
-                re.IGNORECASE,
-            ),
-        ]
-
-        fila_actual = None
-
-        def _numero_pdf_partido(valor):
-            """
-            Convierte números cuyo texto quedó partido por el layout del PDF.
-            Ejemplos:
-              '2 50.00'     -> 250.00
-              '1 ,010.34'   -> 1010.34
-              '1 1,832.50'  -> 11832.50
-              '-'           -> None
-            """
-            if valor is None:
-                return None
-
-            texto = str(valor).strip()
-
-            if texto in {"", "-", "--"}:
-                return None
-
-            texto = (
-                texto.replace("$", "")
-                .replace(",", "")
-                .replace(" ", "")
-                .strip()
-            )
-
-            try:
-                return float(texto)
-            except (TypeError, ValueError):
-                return None
-
-        for numero_pagina, linea in lineas_pdf:
-
-            coincidencia = patron_presupuesto_obra.match(linea)
-
-            if coincidencia:
-
-                # Cierra la partida anterior después de haber acumulado
-                # todas sus líneas de descripción.
-                if fila_actual is not None:
-                    filas_presupuesto_obra.append(fila_actual)
-
-                cantidad = _numero_pdf_partido(coincidencia.group(4))
-                precio_unitario = _numero_pdf_partido(coincidencia.group(5))
-                importe = _numero_pdf_partido(coincidencia.group(6))
-
-                fila_actual = {
-                    "partida": coincidencia.group(1).strip(),
-                    "concepto": coincidencia.group(2).strip(),
-                    "unidad": normalizar_unidad(coincidencia.group(3)),
-                    "cantidad": cantidad,
-                    "precio_unitario": precio_unitario,
-                    "importe": importe,
-                    "origen": f"Página {numero_pagina}",
-                    "fila_encabezado": None,
-                    "puntaje_deteccion": 9,
-                }
-
-                paginas_detectadas.add(numero_pagina)
-                continue
-
-            if fila_actual is None:
-                continue
-
-            # Si aparece otra clave AR que no pudo cerrarse porque no trae
-            # precio (por ejemplo "PZA - $ - $ -"), no debe pegarse a la
-            # descripción de la partida anterior.
-            if linea.upper().startswith("AR "):
-                filas_presupuesto_obra.append(fila_actual)
-                fila_actual = None
-                continue
-
-            if any(
-                patron.search(linea)
-                for patron in patrones_ruido_presupuesto
-            ):
-                continue
-
-            # La descripción de estos presupuestos suele continuar debajo
-            # de la línea que contiene unidad/cantidad/precio/importe.
-            fila_actual["concepto"] = re.sub(
-                r"\s+",
-                " ",
-                f"{fila_actual['concepto']} {linea}",
-            ).strip()
-
-        if fila_actual is not None:
-            filas_presupuesto_obra.append(fila_actual)
-
-        # Conserva únicamente partidas realmente cotizadas.
-        filas_presupuesto_obra = [
-            fila
-            for fila in filas_presupuesto_obra
-            if fila.get("concepto")
-            and fila.get("precio_unitario") is not None
-            and fila.get("precio_unitario") > 0
-        ]
-
-        if filas_presupuesto_obra:
-            filas_validas = filas_presupuesto_obra
-
-
     # ======================================================
     # VALIDACIÓN Y LIMPIEZA FINAL
     # ======================================================
@@ -2492,6 +2338,14 @@ if archivo is not None:
                 # ----------------------------------------------------------------
                 items_sin_datos = []
 
+                # Guarda, en el MISMO orden que "filas", la clasificación
+                # (ALTO/BAJO/EN MERCADO) que corresponde a cada fuente para
+                # poder colorear el precio de esa fuente en la tabla nueva
+                # (pedida por dirección) sin necesidad de una columna de
+                # texto "Resultado" aparte -- el color en el precio ya dice
+                # todo.
+                clasificaciones_por_fuente = []
+
                 for registro in fila_registros:
 
                     renglon = registro["renglon"]
@@ -2841,6 +2695,90 @@ if archivo is not None:
 
                         fila["% Diferencia vs referencia"] = None
 
+                    # ------------------------------------------------------------
+                    # Columnas planas pedidas por dirección: Descripción +
+                    # Precio + Confiabilidad por cada fuente (histórico
+                    # interno/Ragasa, Nuevo León, CDMX, IA), sin columna de
+                    # texto "Resultado" aparte -- el color va directo en el
+                    # precio. Si la IA rechazó un match, no se muestra ese
+                    # precio como si fuera confiable: se deja sin precio y
+                    # se marca la descripción y la confiabilidad para que
+                    # quede claro que se descartó, en vez de negociar con
+                    # un dato que ya se sabe que está mal.
+                    # ------------------------------------------------------------
+                    _historico_match = (
+                        consulta_historico.get("match") if consulta_historico else None
+                    )
+                    _historico_rechazado = bool(
+                        _historico_match
+                        and consulta_historico is not None
+                        and _revision_ia_descarta(consulta_historico, usar_ia)[0]
+                    )
+
+                    fila["Descripción histórico"] = (
+                        f"{_historico_match} (descartado por IA)"
+                        if _historico_rechazado
+                        else (_historico_match or "")
+                    )
+                    fila["Precio histórico"] = (
+                        None
+                        if _historico_rechazado
+                        else (consulta_historico.get("precio_mediana") if consulta_historico else None)
+                    )
+                    fila["Confiabilidad histórico"] = (
+                        "BAJA"
+                        if _historico_rechazado
+                        else (consulta_historico.get("confianza") if consulta_historico else None)
+                    )
+
+                    fila["Descripción Nuevo León"] = (
+                        f"{nl.get('match')} (descartado por IA)"
+                        if nl_rechazado_por_ia and nl.get("match")
+                        else (nl.get("match") or "")
+                    )
+                    fila["Precio Nuevo León"] = (
+                        None if nl_rechazado_por_ia else nl.get("precio_mediana_ajustada")
+                    )
+                    fila["Confiabilidad Nuevo León"] = (
+                        "BAJA" if nl_rechazado_por_ia else nl.get("confianza")
+                    )
+
+                    fila["Descripción CDMX"] = (
+                        f"{cdmx.get('match')} (descartado por IA)"
+                        if cdmx_rechazado_por_ia and cdmx.get("match")
+                        else (cdmx.get("match") or "")
+                    )
+                    fila["Precio CDMX"] = (
+                        None if cdmx_rechazado_por_ia else cdmx.get("precio_referencia")
+                    )
+                    fila["Confiabilidad CDMX"] = (
+                        "BAJA" if cdmx_rechazado_por_ia else cdmx.get("confianza")
+                    )
+
+                    _ia_tiene_dato = bool(busqueda_ia and busqueda_ia.get("tiene_dato"))
+                    fila["Descripción IA"] = (
+                        (busqueda_ia.get("fuente_nombre") or "") if _ia_tiene_dato else ""
+                    )
+                    fila["Precio IA"] = (
+                        busqueda_ia.get("precio_mxn") if _ia_tiene_dato else None
+                    )
+                    fila["Confiabilidad IA"] = (
+                        busqueda_ia.get("confiabilidad") if _ia_tiene_dato else None
+                    )
+
+                    clasificaciones_por_fuente.append(
+                        {
+                            "historico": (
+                                None
+                                if _historico_rechazado
+                                else (consulta_historico.get("clasificacion") if consulta_historico else None)
+                            ),
+                            "nl": None if nl_rechazado_por_ia else nl.get("clasificacion"),
+                            "cdmx": None if cdmx_rechazado_por_ia else cdmx.get("clasificacion"),
+                            "ia": clasificacion_ia_mercado,
+                        }
+                    )
+
                     filas.append(fila)
 
                 # ----------------------------------------------------------------
@@ -3128,228 +3066,129 @@ if archivo is not None:
                     return ""
 
                 # ------------------------------------------------------------
-                # Vista simple (default) vs. vista avanzada: con 4 fuentes,
-                # cada una con su match/confiabilidad/precio/resultado/
-                # diferencia, la tabla completa llega a tener ~25-30
-                # columnas -- demasiado para leer de un vistazo. Por default
-                # se muestra solo lo que hace falta para decidir (veredicto
-                # combinado + qué tan lejos está del mercado); quien quiera
-                # ver POR QUÉ se llegó a ese veredicto (con qué coincidió
-                # cada fuente, su confiabilidad, su precio) puede activar la
-                # vista avanzada con el mismo detalle de siempre.
+                # Tabla única, plana, en el formato exacto que pidió
+                # dirección: por cada fuente (histórico/Ragasa, Nuevo León,
+                # CDMX, IA) solo Descripción + Precio + Confiabilidad --
+                # nada de columnas de "Resultado" ni "% Diferencia" de
+                # texto aparte; el color va directo en la celda del precio
+                # (rojo=caro, amarillo=en rango, verde=barato) para que se
+                # lea de un vistazo, sin tener que interpretar números.
                 # ------------------------------------------------------------
                 st.markdown("#### Resultado de la revisión")
 
-                vista_avanzada = st.checkbox(
-                    "Mostrar el detalle de las 4 fuentes por separado (vista avanzada)",
-                    value=False,
-                    help=(
-                        "Vista simple: un veredicto combinado por partida "
-                        "(caro / en rango / bajo) y qué tan lejos está el "
-                        "precio cotizado del de mercado. Actívala para ver, "
-                        "fuente por fuente, con qué coincidió cada partida, "
-                        "su confiabilidad y su precio de referencia."
+                _columnas_tabla_final = [
+                    "Partida",
+                    "Concepto",
+                    "Cantidad",
+                    "Precio cotizado",
+                    "Importe",
+                    "Descripción histórico",
+                    "Precio histórico",
+                    "Confiabilidad histórico",
+                    "Descripción Nuevo León",
+                    "Precio Nuevo León",
+                    "Confiabilidad Nuevo León",
+                    "Descripción CDMX",
+                    "Precio CDMX",
+                    "Confiabilidad CDMX",
+                    "Descripción IA",
+                    "Precio IA",
+                    "Confiabilidad IA",
+                ]
+                _columnas_tabla_final = [
+                    columna for columna in _columnas_tabla_final if columna in tabla.columns
+                ]
+                tabla_final = tabla[_columnas_tabla_final].rename(
+                    columns={
+                        "Partida": "# Concepto",
+                        "Concepto": "Descripción",
+                        "Precio cotizado": "Precio",
+                        "Importe": "Precio Total",
+                    }
+                )
+
+                _columnas_precio_fuente = {
+                    "Precio histórico": "historico",
+                    "Precio Nuevo León": "nl",
+                    "Precio CDMX": "cdmx",
+                    "Precio IA": "ia",
+                }
+                _columnas_precio_fuente = {
+                    c: k for c, k in _columnas_precio_fuente.items() if c in tabla_final.columns
+                }
+                _columnas_confiabilidad = [
+                    c
+                    for c in (
+                        "Confiabilidad histórico",
+                        "Confiabilidad Nuevo León",
+                        "Confiabilidad CDMX",
+                        "Confiabilidad IA",
+                    )
+                    if c in tabla_final.columns
+                ]
+
+                def _color_precios_por_fuente(fila_actual):
+                    # Colorea cada celda de precio según la clasificación
+                    # (ALTO/BAJO/EN MERCADO) que le corresponde a ESA
+                    # fuente en ESA fila -- se guardó aparte en
+                    # clasificaciones_por_fuente, en el mismo orden que
+                    # las filas de la tabla, precisamente para poder
+                    # colorear el precio sin necesitar una columna de
+                    # texto "Resultado" visible.
+                    indice = fila_actual.name
+                    meta = (
+                        clasificaciones_por_fuente[indice]
+                        if 0 <= indice < len(clasificaciones_por_fuente)
+                        else {}
+                    )
+                    estilos = []
+                    for columna in fila_actual.index:
+                        clave = _columnas_precio_fuente.get(columna)
+                        if clave:
+                            estilos.append(resaltar(meta.get(clave)))
+                        else:
+                            estilos.append("")
+                    return estilos
+
+                _formato_tabla_final = {
+                    columna: (lambda v: f"${v:,.2f}" if pd.notna(v) else "")
+                    for columna in _columnas_precio_fuente
+                }
+                if "Precio" in tabla_final.columns:
+                    _formato_tabla_final["Precio"] = (
+                        lambda v: f"${v:,.2f}" if pd.notna(v) else ""
+                    )
+                if "Precio Total" in tabla_final.columns:
+                    _formato_tabla_final["Precio Total"] = (
+                        lambda v: f"${v:,.2f}" if pd.notna(v) else ""
+                    )
+
+                st.dataframe(
+                    tabla_final.style.apply(
+                        _color_precios_por_fuente, axis=1
+                    ).map(
+                        resaltar_confianza,
+                        subset=_columnas_confiabilidad,
+                    ).format(_formato_tabla_final),
+                    use_container_width=True,
+                    height=min(
+                        650,
+                        60 + 35 * len(tabla),
                     ),
                 )
 
-                _columnas_ocultar_en_pantalla = [
-                    columna
-                    for columna in ("RESULTADO FINAL", "% Diferencia vs referencia")
-                    if columna in tabla.columns
-                ]
-                tabla_visible = tabla.drop(columns=_columnas_ocultar_en_pantalla)
-
-                if vista_avanzada:
-
-                    # Se colorea cada una de las 4 fuentes por separado --
-                    # tanto el resultado de precio (caro/en rango/bajo) como
-                    # la confianza del match (alta/media/baja) -- para que se
-                    # vea de un vistazo en qué está de acuerdo o en
-                    # desacuerdo cada fuente, sin depender de un solo
-                    # veredicto combinado.
-                    _columnas_resaltar_precio = [
-                        columna
-                        for columna in (
-                            "Resultado NL",
-                            "Resultado CDMX",
-                            "Resultado histórico",
-                            "Resultado IA internet",
-                        )
-                        if columna in tabla_visible.columns
-                    ]
-                    _columnas_resaltar_confianza = [
-                        columna
-                        for columna in (
-                            "Confiabilidad NL",
-                            "Confiabilidad CDMX",
-                            "Confiabilidad histórico interno",
-                        )
-                        if columna in tabla_visible.columns
-                    ]
-                    _columnas_diferencia_por_fuente = [
-                        columna
-                        for columna in (
-                            "% Diferencia NL",
-                            "% Diferencia CDMX",
-                            "% Diferencia histórico",
-                            "% Diferencia IA internet",
-                        )
-                        if columna in tabla_visible.columns
-                    ]
-                    _formato_diferencias = {
-                        columna: (
-                            lambda v: (
-                                f"{v:+.1f}%"
-                                if pd.notna(v)
-                                else ""
-                            )
-                        )
-                        for columna in _columnas_diferencia_por_fuente
-                    }
-
-                    st.dataframe(
-                        tabla_visible.style.map(
-                            resaltar,
-                            subset=_columnas_resaltar_precio,
-                        ).map(
-                            resaltar_confianza,
-                            subset=_columnas_resaltar_confianza,
-                        ).map(
-                            resaltar_diferencia,
-                            subset=_columnas_diferencia_por_fuente,
-                        ).format(_formato_diferencias),
-                        use_container_width=True,
-                        height=min(
-                            650,
-                            60 + 35 * len(
-                                tabla
-                            ),
-                        ),
-                    )
-
-                else:
-
-                    # Vista simple, pero con los 4 veredictos por
-                    # separado (uno por fuente) en vez de un solo
-                    # combinado -- pedido explícito: un solo número
-                    # combinado escondía CÓMO se llegó a él (ej. "ALTO"
-                    # con -4% de diferencia, porque salía de promediar
-                    # fuentes con criterios distintos, algo genuinamente
-                    # confuso). Aquí cada veredicto va pegado a su propia
-                    # diferencia, sin el resto del detalle (texto del
-                    # match, confianza, precio de referencia) que sí
-                    # trae la vista avanzada.
-                    _columnas_simples = [
-                        columna
-                        for columna in (
-                            "Partida",
-                            "Concepto",
-                            "Unidad",
-                            "Cantidad",
-                            "Precio cotizado",
-                            "Precio sugerido (negociación)",
-                            "Ahorro potencial",
-                            "Resultado NL",
-                            "% Diferencia NL",
-                            "Resultado CDMX",
-                            "% Diferencia CDMX",
-                            "Resultado histórico",
-                            "% Diferencia histórico",
-                            "Resultado IA internet",
-                            "% Diferencia IA internet",
-                            "Opinión IA (sin datos verificados)",
-                        )
-                        if columna in tabla.columns
-                    ]
-                    tabla_simple = tabla[_columnas_simples].rename(
-                        columns={
-                            "Resultado NL": "NL",
-                            "% Diferencia NL": "% Dif. NL",
-                            "Resultado CDMX": "CDMX",
-                            "% Diferencia CDMX": "% Dif. CDMX",
-                            "Resultado histórico": "Histórico",
-                            "% Diferencia histórico": "% Dif. histórico",
-                            "Resultado IA internet": "IA internet",
-                            "% Diferencia IA internet": "% Dif. IA internet",
-                            "Opinión IA (sin datos verificados)": "Comentario de la IA",
-                        }
-                    )
-
-                    _subset_veredictos_simple = [
-                        columna
-                        for columna in ("NL", "CDMX", "Histórico", "IA internet")
-                        if columna in tabla_simple.columns
-                    ]
-                    _subset_diferencias_simple = [
-                        columna
-                        for columna in (
-                            "% Dif. NL",
-                            "% Dif. CDMX",
-                            "% Dif. histórico",
-                            "% Dif. IA internet",
-                        )
-                        if columna in tabla_simple.columns
-                    ]
-                    _formato_simple = {
-                        columna: (
-                            lambda v: f"{v:+.1f}%" if pd.notna(v) else ""
-                        )
-                        for columna in _subset_diferencias_simple
-                    }
-                    if "Precio sugerido (negociación)" in tabla_simple.columns:
-                        _formato_simple["Precio sugerido (negociación)"] = (
-                            lambda v: f"${v:,.2f}" if pd.notna(v) else ""
-                        )
-                    if "Ahorro potencial" in tabla_simple.columns:
-                        _formato_simple["Ahorro potencial"] = (
-                            lambda v: f"${v:,.2f}" if pd.notna(v) and v else ""
-                        )
-
-                    def _resaltar_ahorro(valor):
-                        if pd.notna(valor) and valor > 0:
-                            return "background-color: #fdebd0; color: #9c5700; font-weight: 600"
-                        return ""
-
-                    _subset_ahorro = (
-                        ["Ahorro potencial"]
-                        if "Ahorro potencial" in tabla_simple.columns
-                        else []
-                    )
-
-                    st.dataframe(
-                        tabla_simple.style.map(
-                            resaltar,
-                            subset=_subset_veredictos_simple,
-                        ).map(
-                            resaltar_diferencia,
-                            subset=_subset_diferencias_simple,
-                        ).map(
-                            _resaltar_ahorro,
-                            subset=_subset_ahorro,
-                        ).format(_formato_simple),
-                        use_container_width=True,
-                        height=min(
-                            650,
-                            60 + 35 * len(
-                                tabla
-                            ),
-                        ),
-                    )
-
-                    st.caption(
-                        "\"Precio sugerido\" es el promedio de las "
-                        "referencias que sí encontraron precio para esa "
-                        "partida -- el número con el que negociar. "
-                        "\"Ahorro potencial\" resaltado en naranja es lo "
-                        "que se podría ahorrar por partida si se logra "
-                        "ese precio. A la derecha, un veredicto por "
-                        "fuente (NL, CDMX, histórico interno, IA en "
-                        "internet) con su % de diferencia -- \"todavía "
-                        "no hay\" significa que esa fuente no encontró "
-                        "nada para esta partida. ¿Quieres ver con qué "
-                        "texto hizo match cada una y su confiabilidad? "
-                        "Activa la vista avanzada de arriba."
-                    )
+                st.caption(
+                    "El color del precio de cada fuente indica si tu "
+                    "precio cotizado está por encima (rojo, caro), "
+                    "dentro del rango (amarillo) o por debajo (verde, "
+                    "barato) de esa referencia. Un precio en blanco "
+                    "significa que esa fuente no encontró nada -- o que "
+                    "la IA revisó la coincidencia y la rechazó (se "
+                    "marca en la descripción). \"Confiabilidad\" es qué "
+                    "tan seguro está el sistema de que encontró el "
+                    "mismo material (verde=alta, rojo=hay que revisar a "
+                    "mano)."
+                )
 
                 buffer = io.BytesIO()
 
