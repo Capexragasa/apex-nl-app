@@ -129,7 +129,7 @@ ia_disponible = revision_ia.ia_disponible()
 
 # La 4a fuente ("IA busca cotizaciones en internet") es independiente de la
 # revision_ia de arriba: no juzga matches existentes, busca en internet un
-# precio de mercado real para las partidas sin otra referencia. Usa
+# precio de mercado real para cada partida. Usa
 # Gemini + Google Search (Secrets: gemini_api_key) como motor principal y,
 # si no esta configurado o se quedo sin cuota, cae automaticamente a
 # Tavily (Secrets: tavily_api_key) como respaldo 100% gratuito (1,000
@@ -1624,6 +1624,160 @@ def leer_pdf(archivo):
         filas_validas = filas_obra
     else:
         filas_validas = filas_tabla
+
+    # ======================================================
+    # QUINTO INTENTO: PRESUPUESTOS DE OBRA TIPO OPUS/NEODATA
+    # CON NÚMEROS "PARTIDOS" POR EL PDF
+    # ======================================================
+    #
+    # Algunos PDFs digitales sí contienen texto, pero pdfplumber extrae
+    # visualmente un número como 250.00 de esta manera:
+    #
+    #     "2 50.00"
+    #
+    # y un importe como 11,832.50 como:
+    #
+    #     "$ 1 1,832.50"
+    #
+    # Eso hacía fallar los patrones anteriores aunque el PDF NO estuviera
+    # escaneado. Este fallback solo corre si los métodos anteriores no
+    # encontraron partidas, por lo que no altera los formatos que ya
+    # funcionaban.
+    if not filas_validas:
+
+        filas_presupuesto_obra = []
+
+        patron_presupuesto_obra = re.compile(
+            r"^(AR\s+\S+)\s+"                         # clave base
+            r"(.+?)\s+"                              # descripción en la línea
+            r"\b(M2|M3|ML|M|PZA|PZAS|SERVICIO|LOTE|KG|TON)\b"
+            r"\s+([0-9][0-9 ,]*\.\d{2}|-)"          # cantidad (tolera espacios)
+            r"\s+\$\s*([0-9][0-9 ,]*\.\d{2}|-)"     # precio unitario
+            r"\s+\$\s*([0-9][0-9 ,]*\.\d{2}|-)\s*$",# importe
+            flags=re.IGNORECASE,
+        )
+
+        patrones_ruido_presupuesto = [
+            re.compile(r"^Descripci[oó]ndel proyecto:", re.IGNORECASE),
+            re.compile(r"^Descripci[oó]n del proyecto:", re.IGNORECASE),
+            re.compile(r"^Cliente:", re.IGNORECASE),
+            re.compile(r"^Fecha:", re.IGNORECASE),
+            re.compile(r"^PRESUPUESTO$", re.IGNORECASE),
+            re.compile(
+                r"^Clave\s+Descripci[oó]n\s+Unidad\s+Cantidad\s+P\s+Unitario\s+Importe$",
+                re.IGNORECASE,
+            ),
+            # Títulos/subtotales de sección, por ejemplo:
+            # "CIMENTACION $ 364,129.47"
+            re.compile(
+                r"^[A-ZÁÉÍÓÚÑ0-9 /().,\-]+"
+                r"\s+\$\s*[0-9][0-9 ,]*\.\d{2}$",
+                re.IGNORECASE,
+            ),
+        ]
+
+        fila_actual = None
+
+        def _numero_pdf_partido(valor):
+            """
+            Convierte números cuyo texto quedó partido por el layout del PDF.
+            Ejemplos:
+              '2 50.00'     -> 250.00
+              '1 ,010.34'   -> 1010.34
+              '1 1,832.50'  -> 11832.50
+              '-'           -> None
+            """
+            if valor is None:
+                return None
+
+            texto = str(valor).strip()
+
+            if texto in {"", "-", "--"}:
+                return None
+
+            texto = (
+                texto.replace("$", "")
+                .replace(",", "")
+                .replace(" ", "")
+                .strip()
+            )
+
+            try:
+                return float(texto)
+            except (TypeError, ValueError):
+                return None
+
+        for numero_pagina, linea in lineas_pdf:
+
+            coincidencia = patron_presupuesto_obra.match(linea)
+
+            if coincidencia:
+
+                # Cierra la partida anterior después de haber acumulado
+                # todas sus líneas de descripción.
+                if fila_actual is not None:
+                    filas_presupuesto_obra.append(fila_actual)
+
+                cantidad = _numero_pdf_partido(coincidencia.group(4))
+                precio_unitario = _numero_pdf_partido(coincidencia.group(5))
+                importe = _numero_pdf_partido(coincidencia.group(6))
+
+                fila_actual = {
+                    "partida": coincidencia.group(1).strip(),
+                    "concepto": coincidencia.group(2).strip(),
+                    "unidad": normalizar_unidad(coincidencia.group(3)),
+                    "cantidad": cantidad,
+                    "precio_unitario": precio_unitario,
+                    "importe": importe,
+                    "origen": f"Página {numero_pagina}",
+                    "fila_encabezado": None,
+                    "puntaje_deteccion": 9,
+                }
+
+                paginas_detectadas.add(numero_pagina)
+                continue
+
+            if fila_actual is None:
+                continue
+
+            # Si aparece otra clave AR que no pudo cerrarse porque no trae
+            # precio (por ejemplo "PZA - $ - $ -"), no debe pegarse a la
+            # descripción de la partida anterior.
+            if linea.upper().startswith("AR "):
+                filas_presupuesto_obra.append(fila_actual)
+                fila_actual = None
+                continue
+
+            if any(
+                patron.search(linea)
+                for patron in patrones_ruido_presupuesto
+            ):
+                continue
+
+            # La descripción de estos presupuestos suele continuar debajo
+            # de la línea que contiene unidad/cantidad/precio/importe.
+            fila_actual["concepto"] = re.sub(
+                r"\s+",
+                " ",
+                f"{fila_actual['concepto']} {linea}",
+            ).strip()
+
+        if fila_actual is not None:
+            filas_presupuesto_obra.append(fila_actual)
+
+        # Conserva únicamente partidas realmente cotizadas.
+        filas_presupuesto_obra = [
+            fila
+            for fila in filas_presupuesto_obra
+            if fila.get("concepto")
+            and fila.get("precio_unitario") is not None
+            and fila.get("precio_unitario") > 0
+        ]
+
+        if filas_presupuesto_obra:
+            filas_validas = filas_presupuesto_obra
+
+
     # ======================================================
     # VALIDACIÓN Y LIMPIEZA FINAL
     # ======================================================
@@ -1762,6 +1916,14 @@ def cargar_y_normalizar_archivo(archivo):
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def leer_archivo_en_cache(nombre, contenido):
+    """Evita volver a extraer un PDF al cambiar controles de Streamlit."""
+    archivo_en_memoria = io.BytesIO(contenido)
+    archivo_en_memoria.name = nombre
+    return cargar_y_normalizar_archivo(archivo_en_memoria)
+
+
 # ==========================================================
 # BARRA LATERAL
 # ==========================================================
@@ -1784,7 +1946,7 @@ with st.sidebar:
 
     guardar_en_historico = st.checkbox(
         "Guardar esta cotización en el histórico",
-        value=True,
+        value=False,
         disabled=historico is None,
         help=(
             "Cada partida quedará guardada para "
@@ -1862,11 +2024,19 @@ with st.sidebar:
 
     if busqueda_ia_disponible:
 
+        buscar_precios_web = st.checkbox(
+            "Buscar precio IA para todas las partidas",
+            value=True,
+            help=(
+                "Puede tardar varios minutos en cotizaciones grandes. "
+                "Consulta cada concepto, incluso si ya existe un precio en "
+                "Ragasa, Nuevo León o CDMX. Requiere Gemini o Tavily."
+            ),
+        )
+
         st.caption(
             "4ª fuente activa: la IA busca en internet un precio de "
-            "mercado real, con la fuente citada, solo para las "
-            "partidas que no tengan ninguna referencia en "
-            "NL/CDMX/histórico -- así rinde más la cuota gratuita. "
+            "mercado real, con la fuente citada, para cada partida. "
             "Usa Gemini (Google Search) como motor principal y, si "
             "se acaba su cuota, cae automáticamente a Tavily como "
             "respaldo 100% gratuito (1,000 búsquedas/mes, sin "
@@ -1874,6 +2044,8 @@ with st.sidebar:
         )
 
     else:
+
+        buscar_precios_web = False
 
         st.caption(
             "4ª fuente ('IA busca cotizaciones en internet') no "
@@ -2018,8 +2190,8 @@ if archivo is not None:
             "Leyendo el archivo y detectando las partidas..."
         ):
             cotizacion, metadatos = (
-                cargar_y_normalizar_archivo(
-                    archivo
+                leer_archivo_en_cache(
+                    archivo.name, archivo.getvalue()
                 )
             )
 
@@ -2283,19 +2455,11 @@ if archivo is not None:
                 # Tavily como respaldo gratuito) un precio de mercado para cada
                 # partida.
                 #
-                # OJO: antes esto corría para TODAS las partidas sin importar si
-                # ya había match en NL/CDMX/histórico -- en cotizaciones grandes
-                # eso agota la cuota gratuita en un par de corridas (cada búsqueda
-                # cuesta cuota real, distinta a la de la revisión de matches
-                # débiles de arriba). Ahora la búsqueda en internet SOLO se manda
-                # para las partidas que NO tienen ninguna referencia VÁLIDA
-                # todavía (ni NL, ni CDMX, ni histórico interno) -- esto corre
-                # DESPUÉS de la revisión de IA de arriba para que una partida cuyo
-                # único match fue rechazado por la IA sí cuente como "sin
-                # referencia" y se mande a buscar en internet, en vez de quedarse
-                # sin ningún precio con el que compararse.
+                # La fuente IA se consulta para cada partida, aun si otra base
+                # encontró una referencia. La búsqueda externa cuesta cuota y
+                # puede ser la parte más lenta de la revisión.
                 # ----------------------------------------------------------------
-                if busqueda_ia_disponible:
+                if busqueda_ia_disponible and buscar_precios_web:
 
                     items_busqueda_mercado = [
                         {
@@ -2304,22 +2468,51 @@ if archivo is not None:
                             "unidad": registro["unidad"],
                         }
                         for indice, registro in enumerate(fila_registros)
-                        if not _referencia_valida(registro["nl"])
-                        and not _referencia_valida(registro["cdmx"])
-                        and not _referencia_valida(registro["consulta_historico"])
                     ]
 
                     resultados_busqueda_mercado = {}
+                    cache_precios_ia = st.session_state.setdefault(
+                        "precios_ia_verificados", {}
+                    )
+                    pendientes = []
+                    for item in items_busqueda_mercado:
+                        clave = (item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        if clave in cache_precios_ia:
+                            resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
+                        else:
+                            pendientes.append(item)
+
+                    progreso_busqueda = st.progress(
+                        0, text="Preparando búsqueda de precios externos..."
+                    )
 
                     for inicio in range(
-                        0, len(items_busqueda_mercado), busqueda_mercado_ia.TAMANO_LOTE
+                        0, len(pendientes), busqueda_mercado_ia.TAMANO_LOTE
                     ):
-                        lote = items_busqueda_mercado[
+                        lote = pendientes[
                             inicio:inicio + busqueda_mercado_ia.TAMANO_LOTE
                         ]
-                        resultados_busqueda_mercado.update(
-                            busqueda_mercado_ia.buscar_precios_mercado_lote(lote)
+                        respuesta_lote = busqueda_mercado_ia.buscar_precios_mercado_lote(lote)
+                        resultados_busqueda_mercado.update(respuesta_lote)
+                        for item in lote:
+                            respuesta = respuesta_lote.get(item["id"])
+                            if respuesta and respuesta.get("tiene_dato") and respuesta.get("precio_mxn"):
+                                clave = (item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                                cache_precios_ia[clave] = respuesta
+
+                        completadas = min(
+                            len(items_busqueda_mercado) - len(pendientes) + inicio + len(lote),
+                            len(items_busqueda_mercado)
                         )
+                        progreso_busqueda.progress(
+                            completadas / len(items_busqueda_mercado),
+                            text=(
+                                f"Búsqueda externa: {completadas}/"
+                                f"{len(items_busqueda_mercado)} partidas"
+                            ),
+                        )
+
+                    progreso_busqueda.empty()
 
                     for indice, registro in enumerate(fila_registros):
                         registro["busqueda_ia"] = resultados_busqueda_mercado.get(
@@ -2337,14 +2530,6 @@ if archivo is not None:
                 # exactamente igual que antes.
                 # ----------------------------------------------------------------
                 items_sin_datos = []
-
-                # Guarda, en el MISMO orden que "filas", la clasificación
-                # (ALTO/BAJO/EN MERCADO) que corresponde a cada fuente para
-                # poder colorear el precio de esa fuente en la tabla nueva
-                # (pedida por dirección) sin necesidad de una columna de
-                # texto "Resultado" aparte -- el color en el precio ya dice
-                # todo.
-                clasificaciones_por_fuente = []
 
                 for registro in fila_registros:
 
@@ -2408,22 +2593,11 @@ if archivo is not None:
                     _diff_ia = None
                     _resultado_ia = "todavía no hay"
 
-                    # La búsqueda en internet solo se manda cuando NINGUNA otra
-                    # fuente (NL/CDMX/histórico) tiene una referencia VÁLIDA --
-                    # es decir, con clasificación Y sin que la IA la haya
-                    # rechazado (mismo criterio que decidió si se mandó a
-                    # buscar, arriba). Así se cuida la cuota gratuita. Se
-                    # distingue este caso (mensaje "no hacía falta") del caso
-                    # en que sí se buscó pero no se encontró nada confiable.
-                    _tenia_otra_referencia = bool(
-                        _referencia_valida(nl)
-                        or _referencia_valida(cdmx)
-                        or _referencia_valida(consulta_historico)
-                    )
+                    if (busqueda_ia and busqueda_ia.get("tiene_dato")
+                            and convertir_numero(busqueda_ia.get("precio_mxn"))
+                            and convertir_numero(busqueda_ia.get("precio_mxn")) > 0):
 
-                    if busqueda_ia and busqueda_ia.get("tiene_dato"):
-
-                        precio_mercado_ia = busqueda_ia["precio_mxn"]
+                        precio_mercado_ia = convertir_numero(busqueda_ia["precio_mxn"])
                         banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
                         clasificacion_ia_mercado = clasificar(
                             precio, banda_baja_ia, banda_alta_ia
@@ -2434,16 +2608,17 @@ if archivo is not None:
                         )
 
                         fila["Precio mercado (IA internet)"] = precio_mercado_ia
+                        nombre_fuente = busqueda_ia.get("fuente_nombre") or ""
+                        url_fuente = busqueda_ia.get("fuente_url") or ""
                         fila["Fuente IA (internet)"] = (
-                            busqueda_ia.get("fuente_nombre") or busqueda_ia.get("fuente_url") or ""
+                            f"{nombre_fuente} ({url_fuente})" if nombre_fuente and url_fuente
+                            else nombre_fuente or url_fuente
                         )
                         fila["Nota IA internet"] = busqueda_ia.get("nota", "")
 
-                    elif busqueda_ia_disponible and _tenia_otra_referencia:
+                    elif busqueda_ia_disponible and not buscar_precios_web:
 
-                        fila["Nota IA internet"] = (
-                            "no hacía falta: ya hay precio de referencia de otra fuente"
-                        )
+                        fila["Nota IA internet"] = "Búsqueda externa desactivada"
 
                     elif busqueda_ia_disponible:
 
@@ -2695,90 +2870,6 @@ if archivo is not None:
 
                         fila["% Diferencia vs referencia"] = None
 
-                    # ------------------------------------------------------------
-                    # Columnas planas pedidas por dirección: Descripción +
-                    # Precio + Confiabilidad por cada fuente (histórico
-                    # interno/Ragasa, Nuevo León, CDMX, IA), sin columna de
-                    # texto "Resultado" aparte -- el color va directo en el
-                    # precio. Si la IA rechazó un match, no se muestra ese
-                    # precio como si fuera confiable: se deja sin precio y
-                    # se marca la descripción y la confiabilidad para que
-                    # quede claro que se descartó, en vez de negociar con
-                    # un dato que ya se sabe que está mal.
-                    # ------------------------------------------------------------
-                    _historico_match = (
-                        consulta_historico.get("match") if consulta_historico else None
-                    )
-                    _historico_rechazado = bool(
-                        _historico_match
-                        and consulta_historico is not None
-                        and _revision_ia_descarta(consulta_historico, usar_ia)[0]
-                    )
-
-                    fila["Descripción histórico"] = (
-                        f"{_historico_match} (descartado por IA)"
-                        if _historico_rechazado
-                        else (_historico_match or "")
-                    )
-                    fila["Precio histórico"] = (
-                        None
-                        if _historico_rechazado
-                        else (consulta_historico.get("precio_mediana") if consulta_historico else None)
-                    )
-                    fila["Confiabilidad histórico"] = (
-                        "BAJA"
-                        if _historico_rechazado
-                        else (consulta_historico.get("confianza") if consulta_historico else None)
-                    )
-
-                    fila["Descripción Nuevo León"] = (
-                        f"{nl.get('match')} (descartado por IA)"
-                        if nl_rechazado_por_ia and nl.get("match")
-                        else (nl.get("match") or "")
-                    )
-                    fila["Precio Nuevo León"] = (
-                        None if nl_rechazado_por_ia else nl.get("precio_mediana_ajustada")
-                    )
-                    fila["Confiabilidad Nuevo León"] = (
-                        "BAJA" if nl_rechazado_por_ia else nl.get("confianza")
-                    )
-
-                    fila["Descripción CDMX"] = (
-                        f"{cdmx.get('match')} (descartado por IA)"
-                        if cdmx_rechazado_por_ia and cdmx.get("match")
-                        else (cdmx.get("match") or "")
-                    )
-                    fila["Precio CDMX"] = (
-                        None if cdmx_rechazado_por_ia else cdmx.get("precio_referencia")
-                    )
-                    fila["Confiabilidad CDMX"] = (
-                        "BAJA" if cdmx_rechazado_por_ia else cdmx.get("confianza")
-                    )
-
-                    _ia_tiene_dato = bool(busqueda_ia and busqueda_ia.get("tiene_dato"))
-                    fila["Descripción IA"] = (
-                        (busqueda_ia.get("fuente_nombre") or "") if _ia_tiene_dato else ""
-                    )
-                    fila["Precio IA"] = (
-                        busqueda_ia.get("precio_mxn") if _ia_tiene_dato else None
-                    )
-                    fila["Confiabilidad IA"] = (
-                        busqueda_ia.get("confiabilidad") if _ia_tiene_dato else None
-                    )
-
-                    clasificaciones_por_fuente.append(
-                        {
-                            "historico": (
-                                None
-                                if _historico_rechazado
-                                else (consulta_historico.get("clasificacion") if consulta_historico else None)
-                            ),
-                            "nl": None if nl_rechazado_por_ia else nl.get("clasificacion"),
-                            "cdmx": None if cdmx_rechazado_por_ia else cdmx.get("clasificacion"),
-                            "ia": clasificacion_ia_mercado,
-                        }
-                    )
-
                     filas.append(fila)
 
                 # ----------------------------------------------------------------
@@ -2964,7 +3055,7 @@ if archivo is not None:
                 _error_revision = revision_ia.ultimo_error() if usar_ia else None
                 _error_busqueda = (
                     busqueda_mercado_ia.ultimo_error()
-                    if busqueda_ia_disponible
+                    if busqueda_ia_disponible and buscar_precios_web
                     else None
                 )
 
@@ -3066,133 +3157,121 @@ if archivo is not None:
                     return ""
 
                 # ------------------------------------------------------------
-                # Tabla única, plana, en el formato exacto que pidió
-                # dirección: por cada fuente (histórico/Ragasa, Nuevo León,
-                # CDMX, IA) solo Descripción + Precio + Confiabilidad --
-                # nada de columnas de "Resultado" ni "% Diferencia" de
-                # texto aparte; el color va directo en la celda del precio
-                # (rojo=caro, amarillo=en rango, verde=barato) para que se
-                # lea de un vistazo, sin tener que interpretar números.
+                # Vista simple (default) vs. vista avanzada: con 4 fuentes,
+                # cada una con su match/confiabilidad/precio/resultado/
+                # diferencia, la tabla completa llega a tener ~25-30
+                # columnas -- demasiado para leer de un vistazo. Por default
+                # se muestra solo lo que hace falta para decidir (veredicto
+                # combinado + qué tan lejos está del mercado); quien quiera
+                # ver POR QUÉ se llegó a ese veredicto (con qué coincidió
+                # cada fuente, su confiabilidad, su precio) puede activar la
+                # vista avanzada con el mismo detalle de siempre.
                 # ------------------------------------------------------------
-                st.markdown("#### Resultado de la revisión")
-
-                _columnas_tabla_final = [
-                    "Partida",
-                    "Concepto",
-                    "Cantidad",
-                    "Precio cotizado",
-                    "Importe",
-                    "Descripción histórico",
-                    "Precio histórico",
-                    "Confiabilidad histórico",
-                    "Descripción Nuevo León",
-                    "Precio Nuevo León",
-                    "Confiabilidad Nuevo León",
-                    "Descripción CDMX",
-                    "Precio CDMX",
-                    "Confiabilidad CDMX",
-                    "Descripción IA",
-                    "Precio IA",
-                    "Confiabilidad IA",
-                ]
-                _columnas_tabla_final = [
-                    columna for columna in _columnas_tabla_final if columna in tabla.columns
-                ]
-                tabla_final = tabla[_columnas_tabla_final].rename(
-                    columns={
-                        "Partida": "# Concepto",
-                        "Concepto": "Descripción",
-                        "Precio cotizado": "Precio",
-                        "Importe": "Precio Total",
-                    }
+                st.markdown("#### Comparativo por partida")
+                st.caption(
+                    "🔴 Cotizado alto · 🟡 En mercado · 🟢 Cotizado bajo · "
+                    "Gris: sin referencia validada. Los precios son unitarios; "
+                    "el total corresponde a cantidad × precio cotizado."
                 )
 
-                _columnas_precio_fuente = {
-                    "Precio histórico": "historico",
-                    "Precio Nuevo León": "nl",
-                    "Precio CDMX": "cdmx",
-                    "Precio IA": "ia",
-                }
-                _columnas_precio_fuente = {
-                    c: k for c, k in _columnas_precio_fuente.items() if c in tabla_final.columns
-                }
-                _columnas_confiabilidad = [
-                    c
-                    for c in (
-                        "Confiabilidad histórico",
-                        "Confiabilidad Nuevo León",
-                        "Confiabilidad CDMX",
-                        "Confiabilidad IA",
+                def _columna(nombre):
+                    return tabla[nombre] if nombre in tabla else pd.Series(
+                        [None] * len(tabla), index=tabla.index
                     )
-                    if c in tabla_final.columns
+
+                comparativo = pd.DataFrame(index=tabla.index)
+                comparativo["# Concepto"] = _columna("Partida")
+                comparativo["Descripción"] = _columna("Concepto")
+                comparativo["Cantidad"] = _columna("Cantidad")
+                comparativo["Precio"] = _columna("Precio cotizado")
+                comparativo["Precio total"] = _columna("Importe")
+                _total_calculado = pd.to_numeric(comparativo["Cantidad"], errors="coerce") * pd.to_numeric(comparativo["Precio"], errors="coerce")
+                comparativo["Precio total"] = comparativo["Precio total"].fillna(_total_calculado)
+                comparativo["Descripción histórico Ragasa"] = _columna("Match histórico interno")
+                comparativo["Precio histórico"] = _columna("Precio mediana histórico")
+                comparativo["Confiabilidad histórico"] = _columna("Confiabilidad histórico interno")
+                comparativo["Descripción Nuevo León"] = _columna("Match NL")
+                comparativo["Precio Nuevo León"] = _columna("Precio mediana NL (ajustado hoy)")
+                comparativo["Confiabilidad Nuevo León"] = _columna("Confiabilidad NL")
+                comparativo["Descripción CDMX"] = _columna("Match CDMX")
+                comparativo["Precio CDMX"] = _columna("Precio referencia CDMX")
+                comparativo["Confiabilidad CDMX"] = _columna("Confiabilidad CDMX")
+                comparativo["Descripción IA"] = _columna("Nota IA internet")
+                _fuente_ia = _columna("Fuente IA (internet)")
+                _opinion_ia = _columna("Opinión IA (sin datos verificados)")
+                comparativo["Descripción IA"] = [
+                    (f"{fuente} — {nota}" if pd.notna(fuente) and str(fuente).strip() else
+                     str(opinion) if pd.notna(opinion) and str(opinion).strip() else nota)
+                    for fuente, nota, opinion in zip(_fuente_ia, comparativo["Descripción IA"], _opinion_ia)
+                ]
+                comparativo["Precio IA"] = _columna("Precio mercado (IA internet)")
+                for _precio_col, _resultado_col in (
+                    ("Precio histórico", "Resultado histórico"),
+                    ("Precio Nuevo León", "Resultado NL"),
+                    ("Precio CDMX", "Resultado CDMX"),
+                ):
+                    if _resultado_col in tabla:
+                        _descartados = tabla[_resultado_col].astype(str).str.contains(
+                            "descartado", case=False, na=False
+                        )
+                        comparativo.loc[_descartados, _precio_col] = float("nan")
+                comparativo["Confiabilidad IA"] = [
+                    "Precio con fuente: verificar equivalencia" if pd.notna(valor) else
+                    "Opinión sin precio verificable" if pd.notna(opinion) and str(opinion).strip() else
+                    "Sin precio verificable"
+                    for valor, opinion in zip(comparativo["Precio IA"], _opinion_ia)
                 ]
 
-                def _color_precios_por_fuente(fila_actual):
-                    # Colorea cada celda de precio según la clasificación
-                    # (ALTO/BAJO/EN MERCADO) que le corresponde a ESA
-                    # fuente en ESA fila -- se guardó aparte en
-                    # clasificaciones_por_fuente, en el mismo orden que
-                    # las filas de la tabla, precisamente para poder
-                    # colorear el precio sin necesitar una columna de
-                    # texto "Resultado" visible.
-                    indice = fila_actual.name
-                    meta = (
-                        clasificaciones_por_fuente[indice]
-                        if 0 <= indice < len(clasificaciones_por_fuente)
-                        else {}
-                    )
-                    estilos = []
-                    for columna in fila_actual.index:
-                        clave = _columnas_precio_fuente.get(columna)
-                        if clave:
-                            estilos.append(resaltar(meta.get(clave)))
-                        else:
-                            estilos.append("")
+                _resultado_por_precio = {
+                    "Precio histórico": "Resultado histórico",
+                    "Precio Nuevo León": "Resultado NL",
+                    "Precio CDMX": "Resultado CDMX",
+                    "Precio IA": "Resultado IA internet",
+                }
+                _formatos = {
+                    col: lambda valor: f"${valor:,.2f}" if pd.notna(valor) else "—"
+                    for col in ["Precio", "Precio total", *_resultado_por_precio]
+                }
+                def _estilo_precio(data):
+                    estilos = pd.DataFrame("", index=data.index, columns=data.columns)
+                    colores = {
+                        "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
+                        "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 650",
+                        "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 650",
+                    }
+                    for precio_col, resultado_col in _resultado_por_precio.items():
+                        for indice in data.index:
+                            resultado = str(tabla.at[indice, resultado_col]) if resultado_col in tabla else ""
+                            valor = data.at[indice, precio_col]
+                            estilos.at[indice, precio_col] = (
+                                "background-color: #f1f3f5; color: #60666d"
+                                if pd.isna(valor) else colores.get(resultado, "")
+                            )
                     return estilos
 
-                _formato_tabla_final = {
-                    columna: (lambda v: f"${v:,.2f}" if pd.notna(v) else "")
-                    for columna in _columnas_precio_fuente
-                }
-                if "Precio" in tabla_final.columns:
-                    _formato_tabla_final["Precio"] = (
-                        lambda v: f"${v:,.2f}" if pd.notna(v) else ""
-                    )
-                if "Precio Total" in tabla_final.columns:
-                    _formato_tabla_final["Precio Total"] = (
-                        lambda v: f"${v:,.2f}" if pd.notna(v) else ""
-                    )
-
                 st.dataframe(
-                    tabla_final.style.apply(
-                        _color_precios_por_fuente, axis=1
-                    ).map(
-                        resaltar_confianza,
-                        subset=_columnas_confiabilidad,
-                    ).format(_formato_tabla_final),
+                    comparativo.style.apply(_estilo_precio, axis=None).format(_formatos),
                     use_container_width=True,
-                    height=min(
-                        650,
-                        60 + 35 * len(tabla),
-                    ),
+                    height=min(680, 48 + 36 * len(comparativo)),
+                    hide_index=True,
                 )
-
-                st.caption(
-                    "El color del precio de cada fuente indica si tu "
-                    "precio cotizado está por encima (rojo, caro), "
-                    "dentro del rango (amarillo) o por debajo (verde, "
-                    "barato) de esa referencia. Un precio en blanco "
-                    "significa que esa fuente no encontró nada -- o que "
-                    "la IA revisó la coincidencia y la rechazó (se "
-                    "marca en la descripción). \"Confiabilidad\" es qué "
-                    "tan seguro está el sistema de que encontró el "
-                    "mismo material (verde=alta, rojo=hay que revisar a "
-                    "mano)."
-                )
+                with st.expander("Cómo se validó cada coincidencia"):
+                    st.caption(
+                        "La confiabilidad describe la equivalencia del concepto, no garantiza "
+                        "que precio, alcance, unidad y fecha sean comparables. La IA revisa "
+                        "coincidencias dudosas en lotes. Una búsqueda de internet solo aporta "
+                        "precio si encontró una fuente; confirma su vigencia antes de negociar."
+                    )
+                    detalle = [c for c in tabla.columns if c.startswith("Revisión IA")]
+                    if detalle:
+                        st.dataframe(tabla[["Partida", "Concepto", *detalle]],
+                                     use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No hubo coincidencias dudosas que requirieran revisión adicional.")
 
                 buffer = io.BytesIO()
 
-                tabla.to_excel(
+                comparativo.to_excel(
                     buffer,
                     index=False,
                     engine="openpyxl",
