@@ -2294,6 +2294,7 @@ if archivo is not None:
 
                 filas = []
                 fila_registros = []
+                partidas_sin_descripcion = 0
 
                 for _, renglon in cotizacion.iterrows():
 
@@ -2305,6 +2306,9 @@ if archivo is not None:
                         continue
 
                     concepto = str(renglon["concepto"]).strip()
+                    if concepto.casefold() in ("", "none", "nan", "null"):
+                        partidas_sin_descripcion += 1
+                        continue
                     unidad = str(renglon["unidad"]).strip()
 
                     resultado = comparador.evaluar(
@@ -2337,6 +2341,12 @@ if archivo is not None:
                             "cdmx": cdmx,
                             "consulta_historico": consulta_historico,
                         }
+                    )
+
+                if partidas_sin_descripcion:
+                    st.warning(
+                        f"{partidas_sin_descripcion} renglón(es) sin descripción se omitieron "
+                        "del comparativo. Revisa la vista previa y corrige el archivo de origen."
                     )
 
                 # ----------------------------------------------------------------
@@ -2476,7 +2486,7 @@ if archivo is not None:
                     )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = (item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        clave = ("equivalencia-v3", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                         if clave in cache_precios_ia:
                             resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
                         else:
@@ -3267,7 +3277,7 @@ if archivo is not None:
                     return estilos
 
                 st.dataframe(
-                    comparativo.style.apply(_estilo_precio, axis=None).format(_formatos),
+                    comparativo.style.apply(_estilo_precio, axis=None).format(_formatos, na_rep="—"),
                     use_container_width=True,
                     height=min(680, 48 + 36 * len(comparativo)),
                     hide_index=True,
@@ -3288,7 +3298,7 @@ if archivo is not None:
 
                 buffer = io.BytesIO()
 
-                comparativo.to_excel(
+                comparativo.replace({"None": "", "nan": ""}).to_excel(
                     buffer,
                     index=False,
                     engine="openpyxl",
