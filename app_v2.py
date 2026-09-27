@@ -72,7 +72,7 @@ st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
-st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 3")
+st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 4")
 
 
 # ==========================================================
@@ -2489,7 +2489,7 @@ if archivo is not None:
                     )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = ("fuente-verificada-v4", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        clave = ("fuente-verificada-v5", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                         if clave in cache_precios_ia:
                             resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
                         else:
@@ -2611,15 +2611,24 @@ if archivo is not None:
                             and convertir_numero(busqueda_ia.get("precio_mxn")) > 0):
 
                         precio_mercado_ia = convertir_numero(busqueda_ia["precio_mxn"])
-                        banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
-                        clasificacion_ia_mercado = clasificar(
-                            precio, banda_baja_ia, banda_alta_ia
-                        )
-                        _resultado_ia = clasificacion_ia_mercado
-                        _diff_ia = round(
-                            (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
-                        )
+                        es_referencia_web = str(
+                            busqueda_ia.get("motor", "")
+                        ).startswith("Tavily")
+                        if es_referencia_web:
+                            # El fragmento contiene un precio, pero no prueba
+                            # por sí solo que coincidan alcance, fecha e impuestos.
+                            _resultado_ia = "REFERENCIA WEB"
+                        else:
+                            banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
+                            clasificacion_ia_mercado = clasificar(
+                                precio, banda_baja_ia, banda_alta_ia
+                            )
+                            _resultado_ia = clasificacion_ia_mercado
+                            _diff_ia = round(
+                                (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
+                            )
 
+                        fila["Motor IA"] = busqueda_ia.get("motor", "")
                         fila["Precio mercado (IA internet)"] = precio_mercado_ia
                         nombre_fuente = busqueda_ia.get("fuente_nombre") or ""
                         url_fuente = busqueda_ia.get("fuente_url") or ""
@@ -3241,11 +3250,13 @@ if archivo is not None:
                     _baja = comparativo[_confianza_col].astype(str).str.upper().eq("BAJA")
                     comparativo.loc[_baja, _precio_col] = float("nan")
 
+                _motor_ia = _columna("Motor IA")
                 comparativo["Confiabilidad IA"] = [
-                    "Precio en fuente: revisar alcance" if pd.notna(valor) else
+                    ("Referencia web: alcance por validar" if str(motor).startswith("Tavily")
+                     else "Fuente identificada: revisar alcance") if pd.notna(valor) else
                     "Opinión sin precio verificable" if pd.notna(opinion) and str(opinion).strip() else
                     "Sin precio verificable"
-                    for valor, opinion in zip(comparativo["Precio IA"], _opinion_ia)
+                    for valor, opinion, motor in zip(comparativo["Precio IA"], _opinion_ia, _motor_ia)
                 ]
 
                 # Ausencia de referencia: mostrar un guion, sin textos técnicos como None.
@@ -3279,6 +3290,7 @@ if archivo is not None:
                         "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
                         "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 650",
                         "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 650",
+                        "REFERENCIA WEB": "background-color: #eef1f4; color: #344054",
                     }
                     for precio_col, resultado_col in _resultado_por_precio.items():
                         for indice in data.index:
