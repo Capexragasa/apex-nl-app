@@ -2409,7 +2409,9 @@ if archivo is not None:
                             # sin importar su confianza -- para que la IA
                             # confirme también las que ya parecían seguras.
                             if fuente_dict.get("match") and (
-                                fuente_dict.get("motivo") or revisar_todo_con_ia
+                                fuente_dict.get("motivo")
+                                or str(fuente_dict.get("confianza", "")).upper() == "BAJA"
+                                or revisar_todo_con_ia
                             ):
                                 items_revision.append(
                                     {
