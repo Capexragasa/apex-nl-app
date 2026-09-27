@@ -179,7 +179,17 @@ def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
         if hallada not in sinonimos.get(esperada, {esperada}):
             return False
     codigos = _codigos_distintivos(original)
-    if codigos and not codigos.intersection(_codigos_distintivos(encontrada)):
+    # En equipos con varios códigos, todos deben estar presentes: compartir
+    # solo "2x40A" no convierte un Chint en un Square D FAL 22040.
+    codigos |= {
+        re.sub(r"\s+", "", c).upper()
+        for c in re.findall(r"\b[A-Za-z]{2,6}\s+\d{3,6}\b", original)
+    }
+    texto_fuente = _texto_plano_normalizado(encontrada)
+    if codigos and not all(codigo in texto_fuente for codigo in codigos):
+        return False
+    marca = re.search(r"\bMARCA\s+([A-Za-z]+(?:\s+[A-Za-z])?)", original, re.I)
+    if marca and _texto_plano_normalizado(marca.group(1)) not in texto_fuente:
         return False
     claves = _tokens_relevantes(original)
     if claves and not claves.intersection(_tokens_relevantes(encontrada)):
@@ -565,8 +575,8 @@ def _buscar_precio_tavily_item(item, api_key=None):
 
     # Un número en el resumen no basta si el enlace seleccionado no
     # identifica el producto de la partida.
-    if precio is not None and codigos_consulta and not (
-        codigos_consulta.intersection(_codigos_distintivos(primer_titulo))
+    if precio is not None and not _referencia_equivalente(
+        item, primer_titulo, item.get("unidad")
     ):
         codigo_no_verificado = True
         precio = None
