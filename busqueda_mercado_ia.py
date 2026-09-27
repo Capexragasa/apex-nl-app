@@ -466,10 +466,11 @@ def _texto_plano_normalizado(*fragmentos):
 
 
 def _buscar_precio_tavily_item(item, api_key=None):
+    """Un precio solo se acepta si figura en el fragmento de la MISMA URL citada."""
     try:
         import requests
     except Exception as error:
-        _registrar_error(f"Tavily (respaldo gratuito): falta la libreria 'requests' ({error})")
+        _registrar_error(f"Tavily: falta requests ({error})")
         return None
 
     key = _obtener_tavily_key(api_key)
@@ -477,8 +478,7 @@ def _buscar_precio_tavily_item(item, api_key=None):
         return None
 
     consulta = (
-        f'precio de "{item["descripcion"]}" ({item["unidad"]}) en México, '
-        "pesos MXN, proveedor o ferretería actual"
+        f'precio "{item["descripcion"]}" {item["unidad"]} México MXN'
     )
     try:
         resp = requests.post(
@@ -487,128 +487,68 @@ def _buscar_precio_tavily_item(item, api_key=None):
                 "api_key": key,
                 "query": consulta,
                 "search_depth": "basic",
-                "include_answer": True,
+                "include_answer": False,
                 "max_results": 5,
             },
             timeout=20,
         )
         resp.raise_for_status()
-        datos = resp.json()
+        resultados = resp.json().get("results") or []
     except Exception as error:
-        _registrar_error(f"Tavily (respaldo gratuito): {error}")
+        _registrar_error(f"Tavily: {error}")
         return None
 
-    resumen = datos.get("answer") or ""
-    resultados = datos.get("results") or []
-    primera_url = resultados[0].get("url", "") if resultados else ""
-    primer_titulo = resultados[0].get("title", "") if resultados else ""
-    codigos_consulta = _codigos_distintivos(item["descripcion"])
-    if codigos_consulta:
-        for fuente in resultados:
-            titulo = fuente.get("title", "") or ""
-            if codigos_consulta.intersection(_codigos_distintivos(titulo)):
-                primera_url = fuente.get("url", "") or ""
-                primer_titulo = titulo
-                break
-
-    # OJO -- bug real encontrado en pruebas: antes, si el resumen de
-    # Tavily no traía un precio, se buscaba un numero con pinta de precio
-    # en el CONTENIDO CRUDO de los resultados de busqueda (paginas que
-    # Tavily regreso pero que pueden no tener nada que ver con la
-    # partida real si la busqueda no encontro algo relevante). Eso
-    # provoco un caso real: para un modelo de bomba inventado para
-    # pruebas, Tavily no encontro nada relevante, pero el regex agarro
-    # un numero de una pagina de criptomonedas (CoinGecko) que
-    # coincidencialmente traia "... MXN" en el texto, y ese numero
-    # se presento como si fuera el precio de mercado -- justo lo que
-    # nunca se debe hacer (inventar/adivinar un precio). Ahora SOLO se
-    # confia en el resumen que el propio Tavily redacto para responder
-    # la pregunta (resumen); si ahi no hay un precio claro, la partida
-    # se marca sin dato en vez de arriesgarse a un numero de contexto
-    # equivocado.
-    _frases_sin_precio = (
-        "no disponible", "not available", "no encontr", "no se encontr",
-        "no data", "sin informacion", "sin información", "no information",
-        "could not find", "no pricing", "no price",
-    )
-    resumen_normalizado = resumen.lower()
-    hay_indicio_de_sin_dato = any(
-        frase in resumen_normalizado for frase in _frases_sin_precio
-    )
-
-    precio = (
-        None
-        if hay_indicio_de_sin_dato
-        else _extraer_precio_de_texto(resumen, item.get("unidad"))
-    )
-
-    # Verificación del código/modelo distintivo (ver comentario arriba de
-    # _codigos_distintivos): si la partida menciona un modelo específico
-    # y ese código no aparece en NINGÚN lado del texto real que Tavily
-    # regresó, no se confía en el precio aunque el resumen lo afirme con
-    # seguridad -- es la señal más confiable de que el resumen está
-    # atribuyendo el precio de un producto genérico al modelo específico
-    # que se buscaba.
-    # IMPORTANTE: el resumen (`resumen`) NO se incluye en esta
-    # verificación a propósito, aunque parezca que "ya trae el código".
-    # Tavily redacta su resumen repitiendo palabras de la PREGUNTA que se
-    # le mandó (que ya incluye el código, porque es la partida cotizada)
-    # -- así que el código *siempre* va a aparecer en el resumen, sea o
-    # no real el dato. Comprobar contra el resumen sería revisar la
-    # afirmación contra sí misma. Por eso solo cuentan los TÍTULOS y
-    # CONTENIDO de los resultados de búsqueda reales (las páginas web que
-    # Tavily de verdad encontró): si el código no aparece ahí, es que
-    # ninguna página real habla de ese modelo específico.
-    codigo_no_verificado = False
-    if precio is not None:
-        codigos = _codigos_distintivos(item["descripcion"])
-        if codigos:
-            texto_disponible = _texto_plano_normalizado(
-                *[
-                    f"{r.get('title', '')} {r.get('content', '')}"
-                    for r in resultados
-                ],
-            )
-            if not any(codigo in texto_disponible for codigo in codigos):
-                codigo_no_verificado = True
-                precio = None
-
-    # Un número en el resumen no basta si el enlace seleccionado no
-    # identifica el producto de la partida.
-    if precio is not None and not _referencia_equivalente(
-        item, primer_titulo, item.get("unidad")
-    ):
-        codigo_no_verificado = True
-        precio = None
-
-    if codigo_no_verificado:
-        nota = (
-            (resumen + " " if resumen else "")
-            + "[verificación: el modelo/código exacto de esta partida no "
-            "se encontró en ninguna fuente real consultada -- se "
-            "descarta el precio por precaución, aunque el resumen lo "
-            "mencionaba]"
-        )
-    else:
-        nota = resumen or "no se encontró un resumen con precio claro en los resultados"
+    for fuente in resultados:
+        titulo = str(fuente.get("title") or "")
+        contenido = str(fuente.get("content") or "")
+        url = str(fuente.get("url") or "")
+        if (not url or any(x in titulo.lower() for x in ("calculadora", "blog", "foro"))
+                or not _referencia_equivalente(item, titulo, item.get("unidad"))):
+            continue
+        # El resumen generado por el buscador puede atribuir el precio de
+        # otra página a esta partida. Extraerlo solo del fragmento de la URL.
+        precio = _extraer_precio_de_texto(contenido, item.get("unidad"))
+        if precio is None or precio <= 0:
+            continue
+        return {
+            "precio_mxn": precio,
+            "unidad_encontrada": item["unidad"],
+            "fuente_nombre": titulo[:120],
+            "fuente_url": url,
+            "nota": "Precio encontrado en el fragmento de la fuente; revisar alcance, fecha e impuestos.",
+            "tiene_dato": True,
+            "motor": "Tavily",
+        }
 
     return {
-        "precio_mxn": precio,
-        "unidad_encontrada": item["unidad"],
-        "fuente_nombre": (primer_titulo or "Búsqueda web (Tavily, respaldo gratuito)")[:120],
-        "fuente_url": primera_url or "",
-        "nota": nota[:300],
-        "tiene_dato": precio is not None,
-        "motor": "Tavily (respaldo gratuito)",
+        "precio_mxn": None,
+        "unidad_encontrada": "",
+        "fuente_nombre": "",
+        "fuente_url": "",
+        "nota": "Sin precio comprobable en una fuente que coincida con el concepto y la unidad.",
+        "tiene_dato": False,
+        "motor": "Tavily",
     }
 
 
 def _buscar_precios_mercado_tavily_lote(items, api_key=None):
+    # Las búsquedas de partidas son independientes; limitar concurrencia
+    # reduce el tiempo total sin disparar todas las solicitudes a la vez.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     salida = {}
-    for it in items:
-        resultado = _buscar_precio_tavily_item(it, api_key=api_key)
-        if resultado is not None:
-            salida[it["id"]] = resultado
+    with ThreadPoolExecutor(max_workers=4) as ejecutor:
+        tareas = {
+            ejecutor.submit(_buscar_precio_tavily_item, it, api_key): str(it["id"])
+            for it in items
+        }
+        for tarea in as_completed(tareas):
+            id_ = tareas[tarea]
+            try:
+                resultado = tarea.result()
+                if resultado is not None:
+                    salida[id_] = resultado
+            except Exception as error:
+                _registrar_error(f"Tavily: {error}")
     return salida
 
 
