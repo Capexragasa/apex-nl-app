@@ -72,7 +72,7 @@ st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
-st.caption("Versión del comparativo: 2026-09-26 · validación 2")
+st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 3")
 
 
 # ==========================================================
@@ -2489,7 +2489,7 @@ if archivo is not None:
                     )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = ("equivalencia-v3", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        clave = ("fuente-verificada-v4", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                         if clave in cache_precios_ia:
                             resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
                         else:
@@ -3242,7 +3242,7 @@ if archivo is not None:
                     comparativo.loc[_baja, _precio_col] = float("nan")
 
                 comparativo["Confiabilidad IA"] = [
-                    "Precio con fuente: verificar equivalencia" if pd.notna(valor) else
+                    "Precio en fuente: revisar alcance" if pd.notna(valor) else
                     "Opinión sin precio verificable" if pd.notna(opinion) and str(opinion).strip() else
                     "Sin precio verificable"
                     for valor, opinion in zip(comparativo["Precio IA"], _opinion_ia)
