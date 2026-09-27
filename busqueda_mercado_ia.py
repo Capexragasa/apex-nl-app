@@ -150,6 +150,43 @@ def _fuentes_de_respuesta(respuesta):
     return urls
 
 
+def _tokens_relevantes(texto):
+    """Palabras que ayudan a verificar que la fuente habla del mismo concepto."""
+    return {
+        palabra for palabra in re.findall(r"[a-z0-9]+", (texto or "").lower())
+        if len(palabra) >= 5 and palabra not in {
+            "suministro", "instalacion", "colocacion", "precio", "mexico",
+            "material", "unidad", "marca", "modelo", "equipo", "servicio",
+            "concreto", "limpieza", "general", "pieza", "obra",
+        }
+    }
+
+
+def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
+    original = str(item.get("descripcion") or "")
+    encontrada = str(descripcion_fuente or "")
+    if not original.strip() or not encontrada.strip():
+        return False
+    esperada = str(item.get("unidad") or "").strip().upper()
+    hallada = str(unidad_fuente or "").strip().upper()
+    if esperada and hallada and esperada != hallada:
+        sinonimos = {
+            "PZA": {"PIEZA", "UNIDAD", "PZA"},
+            "M2": {"M2", "M²", "METRO CUADRADO"},
+            "M3": {"M3", "M³", "METRO CUBICO", "METRO CÚBICO"},
+            "KG": {"KG", "KILO", "KILOGRAMO"},
+        }
+        if hallada not in sinonimos.get(esperada, {esperada}):
+            return False
+    codigos = _codigos_distintivos(original)
+    if codigos and not codigos.intersection(_codigos_distintivos(encontrada)):
+        return False
+    claves = _tokens_relevantes(original)
+    if claves and not claves.intersection(_tokens_relevantes(encontrada)):
+        return False
+    return True
+
+
 def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
     """Intenta el motor principal (Gemini + Google Search grounding).
     Regresa {} si no esta disponible o si la llamada falla (revisa
@@ -178,6 +215,7 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         'o proveedor>", "fuente_url": "<url real de donde salio, o vacio '
         'si no aplica>", "nota": "<1 frase en espanol, ej. rango de precios '
         'o contexto>"}, ...]}\n\n'
+        "Solo acepta equivalencia de modelo, marca, capacidad, alcance y unidad; no uses un precio de otro producto parecido. Si no puedes comprobar el producto exacto en la fuente, usa null. "
         "Si no encuentras un precio real y verificable para una partida, "
         "pon precio_mxn en null -- NUNCA inventes un numero."
     )
@@ -214,12 +252,27 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
             precio = float(precio) if precio is not None else None
         except (TypeError, ValueError):
             precio = None
-        salida[id_] = {
+        item_original = next((it for it in items if str(it["id"]) == str(id_)), None)
+        descripcion_encontrada = str(r.get("descripcion_encontrada", "") or "")
+        unidad_encontrada = str(r.get("unidad_encontrada", "") or "")
+        fuente_url = str(r.get("fuente_url", "") or "")
+        # No asociar un precio a la primera URL genérica del lote: puede
+        # corresponder a otra partida distinta.
+        fuente_verificada = bool(fuente_url and any(
+            fuente_url == fuente["url"] for fuente in fuentes_citadas
+        ))
+        equivalente = bool(item_original and _referencia_equivalente(
+            item_original, descripcion_encontrada, unidad_encontrada
+        ))
+        if not fuente_verificada or not equivalente:
+            precio = None
+        salida[str(id_)] = {
             "precio_mxn": precio,
-            "unidad_encontrada": str(r.get("unidad_encontrada", "") or ""),
+            "unidad_encontrada": unidad_encontrada,
             "fuente_nombre": str(r.get("fuente_nombre", "") or ""),
-            "fuente_url": str(r.get("fuente_url", "") or "") or url_generica,
-            "nota": str(r.get("nota", "") or ""),
+            "fuente_url": fuente_url if fuente_verificada else "",
+            "nota": (str(r.get("nota", "") or "") if precio is not None else
+                     "Sin precio validado: fuente, concepto o unidad no comprobables."),
             "tiene_dato": precio is not None,
             "motor": "Gemini (Google Search)",
         }
@@ -439,6 +492,14 @@ def _buscar_precio_tavily_item(item, api_key=None):
     resultados = datos.get("results") or []
     primera_url = resultados[0].get("url", "") if resultados else ""
     primer_titulo = resultados[0].get("title", "") if resultados else ""
+    codigos_consulta = _codigos_distintivos(item["descripcion"])
+    if codigos_consulta:
+        for fuente in resultados:
+            titulo = fuente.get("title", "") or ""
+            if codigos_consulta.intersection(_codigos_distintivos(titulo)):
+                primera_url = fuente.get("url", "") or ""
+                primer_titulo = titulo
+                break
 
     # OJO -- bug real encontrado en pruebas: antes, si el resumen de
     # Tavily no traía un precio, se buscaba un numero con pinta de precio
@@ -502,6 +563,14 @@ def _buscar_precio_tavily_item(item, api_key=None):
                 codigo_no_verificado = True
                 precio = None
 
+    # Un número en el resumen no basta si el enlace seleccionado no
+    # identifica el producto de la partida.
+    if precio is not None and codigos_consulta and not (
+        codigos_consulta.intersection(_codigos_distintivos(primer_titulo))
+    ):
+        codigo_no_verificado = True
+        precio = None
+
     if codigo_no_verificado:
         nota = (
             (resumen + " " if resumen else "")
@@ -552,12 +621,12 @@ def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key
         return {}
 
     salida = _buscar_precios_mercado_gemini_lote(items, api_key=api_key, modelo=modelo)
-    if salida:
-        return salida
-
-    # Gemini no dio nada (no configurado, cuota agotada, u otro error) --
-    # se intenta el respaldo gratuito antes de rendirse.
-    if _tavily_disponible(tavily_api_key):
-        return _buscar_precios_mercado_tavily_lote(items, api_key=tavily_api_key)
-
-    return {}
+    pendientes = [it for it in items if not salida.get(str(it["id"]), {}).get("tiene_dato")]
+    # Si Gemini devolvió una coincidencia no verificable, intentar Tavily
+    # solo para esa partida y conservar los precios confirmados del lote.
+    if pendientes and _tavily_disponible(tavily_api_key):
+        respaldo = _buscar_precios_mercado_tavily_lote(pendientes, api_key=tavily_api_key)
+        for id_, dato in respaldo.items():
+            if dato.get("tiene_dato") or id_ not in salida:
+                salida[id_] = dato
+    return salida
