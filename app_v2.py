@@ -3235,6 +3235,10 @@ if archivo is not None:
                             lambda v: _texto_visible(v) or "—"
                         )
 
+                for _precio in ("Precio", "Precio total", "Precio histórico",
+                                "Precio Nuevo León", "Precio CDMX", "Precio IA"):
+                    comparativo[_precio] = pd.to_numeric(comparativo[_precio], errors="coerce")
+
                 _resultado_por_precio = {
                     "Precio histórico": "Resultado histórico",
                     "Precio Nuevo León": "Resultado NL",
