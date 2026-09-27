@@ -72,6 +72,7 @@ st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
+st.caption("Versión del comparativo: 2026-09-26 · validación 2")
 
 
 # ==========================================================
@@ -3200,6 +3201,9 @@ if archivo is not None:
                 comparativo["Descripción histórico Ragasa"] = _columna("Match histórico interno")
                 comparativo["Precio histórico"] = _columna("Precio mediana histórico")
                 comparativo["Confiabilidad histórico"] = _columna("Confiabilidad histórico interno")
+                comparativo["Descripción histórico Ragasa"] = comparativo["Descripción histórico Ragasa"].replace(
+                    {"todavía no hay": None, "no hay": None, "None": None}
+                )
                 comparativo["Descripción Nuevo León"] = _columna("Match NL")
                 comparativo["Precio Nuevo León"] = _columna("Precio mediana NL (ajustado hoy)")
                 comparativo["Confiabilidad Nuevo León"] = _columna("Confiabilidad NL")
@@ -3227,6 +3231,14 @@ if archivo is not None:
                             "descartado", case=False, na=False
                         )
                         comparativo.loc[_descartados, _precio_col] = float("nan")
+                for _precio_col, _confianza_col in (
+                    ("Precio histórico", "Confiabilidad histórico"),
+                    ("Precio Nuevo León", "Confiabilidad Nuevo León"),
+                    ("Precio CDMX", "Confiabilidad CDMX"),
+                ):
+                    _baja = comparativo[_confianza_col].astype(str).str.upper().eq("BAJA")
+                    comparativo.loc[_baja, _precio_col] = float("nan")
+
                 comparativo["Confiabilidad IA"] = [
                     "Precio con fuente: verificar equivalencia" if pd.notna(valor) else
                     "Opinión sin precio verificable" if pd.notna(opinion) and str(opinion).strip() else
@@ -3269,15 +3281,21 @@ if archivo is not None:
                     for precio_col, resultado_col in _resultado_por_precio.items():
                         for indice in data.index:
                             resultado = str(tabla.at[indice, resultado_col]) if resultado_col in tabla else ""
-                            valor = data.at[indice, precio_col]
+                            valor = comparativo.at[indice, precio_col]
                             estilos.at[indice, precio_col] = (
                                 "background-color: #f1f3f5; color: #60666d"
                                 if pd.isna(valor) else colores.get(resultado, "")
                             )
                     return estilos
 
+                comparativo_vista = comparativo.copy()
+                for _precio in ("Precio", "Precio total", "Precio histórico",
+                                "Precio Nuevo León", "Precio CDMX", "Precio IA"):
+                    comparativo_vista[_precio] = comparativo[_precio].map(
+                        lambda v: f"${v:,.2f}" if pd.notna(v) else "—"
+                    )
                 st.dataframe(
-                    comparativo.style.apply(_estilo_precio, axis=None).format(_formatos, na_rep="—"),
+                    comparativo_vista.style.apply(_estilo_precio, axis=None),
                     use_container_width=True,
                     height=min(680, 48 + 36 * len(comparativo)),
                     hide_index=True,
