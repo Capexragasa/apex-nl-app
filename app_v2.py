@@ -72,7 +72,7 @@ st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
-st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 4")
+st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 5")
 
 
 # ==========================================================
@@ -142,6 +142,30 @@ busqueda_ia_disponible = busqueda_mercado_ia.busqueda_disponible()
 # revision_ia.py (compartida con comparador_multifuente_v2.py) para no
 # duplicarla en dos archivos.
 _revision_ia_descarta = revision_ia.debe_descartarse
+
+def _alcance_distinto(cotizado, referencia):
+    """Descarta diferencias explícitas de alcance que alteran el precio unitario."""
+    original = normalizar_texto(cotizado or "")
+    candidato = normalizar_texto(referencia or "")
+    if not original or not candidato:
+        return False
+    # El precio de instalar, bombear o colocar incluye trabajos que una
+    # partida de solo suministro no está comprando.
+    solo_suministro = "suministro" in original and not any(
+        palabra in original for palabra in ("colocacion", "instalacion", "aplicacion", "bombeo")
+    )
+    if solo_suministro and any(
+        palabra in candidato for palabra in ("colocacion", "instalacion", "aplicacion", "bombeo")
+    ):
+        return True
+    if "premezclado" in original and "elaborado en obra" in candidato:
+        return True
+    if "vinilica" in original and "esmalte" in candidato and "vinilica" not in candidato:
+        return True
+    return False
+
+
+
 
 # Intenta traer el dato mas reciente del INPC directo de la API de INEGI.
 # Si no hay token configurado (Secrets: inegi_api_token) o falla la
@@ -2685,6 +2709,10 @@ if archivo is not None:
                     cdmx_rechazado_por_ia, motivo_descarte_cdmx = (
                         _revision_ia_descarta(cdmx, usar_ia)
                     )
+                    if _alcance_distinto(concepto, nl.get("match")):
+                        nl_rechazado_por_ia, motivo_descarte_nl = True, "alcance distinto"
+                    if _alcance_distinto(concepto, cdmx.get("match")):
+                        cdmx_rechazado_por_ia, motivo_descarte_cdmx = True, "alcance distinto"
 
                     _resultado_nl = nl.get("clasificacion")
                     if nl_rechazado_por_ia and _resultado_nl:
