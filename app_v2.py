@@ -3196,13 +3196,15 @@ if archivo is not None:
                 comparativo["Descripción CDMX"] = _columna("Match CDMX")
                 comparativo["Precio CDMX"] = _columna("Precio referencia CDMX")
                 comparativo["Confiabilidad CDMX"] = _columna("Confiabilidad CDMX")
-                comparativo["Descripción IA"] = _columna("Nota IA internet")
+                _nota_ia = _columna("Nota IA internet")
                 _fuente_ia = _columna("Fuente IA (internet)")
                 _opinion_ia = _columna("Opinión IA (sin datos verificados)")
+                def _texto_visible(valor):
+                    return "" if pd.isna(valor) or str(valor).strip().lower() in ("none", "nan") else str(valor).strip()
                 comparativo["Descripción IA"] = [
-                    (f"{fuente} — {nota}" if pd.notna(fuente) and str(fuente).strip() else
-                     str(opinion) if pd.notna(opinion) and str(opinion).strip() else nota)
-                    for fuente, nota, opinion in zip(_fuente_ia, comparativo["Descripción IA"], _opinion_ia)
+                    " · ".join(x for x in (_texto_visible(fuente), _texto_visible(nota)) if x)
+                    or _texto_visible(opinion)
+                    for fuente, nota, opinion in zip(_fuente_ia, _nota_ia, _opinion_ia)
                 ]
                 comparativo["Precio IA"] = _columna("Precio mercado (IA internet)")
                 for _precio_col, _resultado_col in (
@@ -3221,6 +3223,17 @@ if archivo is not None:
                     "Sin precio verificable"
                     for valor, opinion in zip(comparativo["Precio IA"], _opinion_ia)
                 ]
+
+                # Ausencia de referencia: mostrar un guion, sin textos técnicos como None.
+                # La descripción original vacía se señala para evitar búsquedas sin concepto.
+                comparativo["Descripción"] = comparativo["Descripción"].apply(
+                    lambda v: _texto_visible(v) or "Descripción no detectada: revisar archivo de origen"
+                )
+                for _col in comparativo.columns:
+                    if _col.startswith("Descripción ") or _col.startswith("Confiabilidad "):
+                        comparativo[_col] = comparativo[_col].apply(
+                            lambda v: _texto_visible(v) or "—"
+                        )
 
                 _resultado_por_precio = {
                     "Precio histórico": "Resultado histórico",
