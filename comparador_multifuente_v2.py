@@ -126,6 +126,62 @@ def normalize_text(raw: str) -> str:
     return _expandir_abreviaturas(t)
 
 
+# Redaccion informal de obra (como la escribe un contratista pequeno) vs.
+# redaccion de catalogo (como vienen las bases de NL y CDMX). Ejemplo real:
+# "ESTUCO EN BARDA TANTO POR FUERA COMO POR DENTRO" no encontraba ningun
+# match aunque la base si trae "APLANADO DE ESTUCO ... EN MUROS", porque
+# las palabras de relleno (barda, por fuera, por dentro) hundian el score.
+# Estas reglas generan una SEGUNDA consulta "de catalogo" que se busca
+# ademas de la original; se conserva la que puntue mejor. Nunca reemplazan
+# el texto que ve el usuario.
+_RELLENO_OBRA = [
+    r'\bTANTO POR FUERA COMO POR DENTRO\b',
+    r'\bPOR FUERA Y POR DENTRO\b',
+    r'\bPOR (AMBAS|LAS DOS|AMBOS) (CARAS|LADOS)\b',
+    r'\bEN (LA )?(BARDA|AZOTEA)\b',
+    r'\bPERIMETRO DE PLACA NUEVA\b',
+    r'\bPERIMETR(O|AL)\b',
+    r'\bA \d+(\.\d+)? ?(CM|CMS|M|MT|MTS) DE ALTURA\b',
+    r'\bPARA SOSTENER (EL )?MURO( DE BLOCK)?\b',
+    r'\bPARA AMARRAR (LA )?BARDA\b',
+    r'\bBARDA\b',
+]
+
+_SINONIMOS_OBRA = [
+    # Block "del numero 4/6/8" = espesor de 10/15/20 cm.
+    (r'\bBLOCK (DEL |DE )?(NUM|NUMERO|NO|#)\.? ?6\b', 'BLOCK 15 X 20 X 40'),
+    (r'\bBLOCK (DEL |DE )?(NUM|NUMERO|NO|#)\.? ?4\b', 'BLOCK 10 X 20 X 40'),
+    (r'\bBLOCK (DEL |DE )?(NUM|NUMERO|NO|#)\.? ?8\b', 'BLOCK 20 X 20 X 40'),
+    # "Columnas" de barda de block = castillos.
+    (r'\bCOLUMNAS? (PARA AMARRAR|DE AMARRE|DE BARDA|DE CONFINAMIENTO)\b', 'CASTILLO'),
+    (r'\bARMADO CON ARMEX\b', 'ARMEX'),
+    (r'\bCONCRETO HECHO EN OBRA\b', 'CONCRETO HECHO EN OBRA'),
+]
+
+
+def consulta_catalogo(t: str) -> str:
+    """Version "de catalogo" de un concepto ya normalizado (ver arriba)."""
+    q = f' {t} '
+    for patron, reemplazo in _SINONIMOS_OBRA:
+        q = re.sub(patron, reemplazo, q)
+    if re.search(r'\bESTUCO\b', q) and not re.search(r'\bAPLANADO\b', q):
+        q = re.sub(r'\bESTUCO\b', 'APLANADO DE ESTUCO', q)
+        if not re.search(r'\bMUROS?\b', q):
+            q += ' EN MUROS'
+    for patron in _RELLENO_OBRA:
+        q = re.sub(patron, ' ', q)
+    q = re.sub(r'(?<![0-9])[.,](?![0-9])', ' ', q)
+    q = re.sub(r'\b(Y|DE|EN|CON|DEL|LA|EL)( (Y|DE|EN|CON|DEL|LA|EL))+\b', r'\1', q)
+    q = WS_RE.sub(' ', q).strip()
+    # Una consulta de una sola palabra ("CASTILLO") da 100% con
+    # token_set_ratio contra cualquier concepto que la contenga (ej.
+    # "ANCLAJE DE CASTILLO A COLUMNA"), asi que no aporta: se descarta.
+    palabras = [p for p in q.split() if len(p) > 2 and p not in ('CON', 'DEL', 'LOS', 'LAS')]
+    if len(palabras) < 2:
+        return t
+    return q
+
+
 # Unidades equivalentes que en las bases reales aparecen escritas de
 # formas distintas para la MISMA unidad fisica (confirmado revisando
 # Base_Precios_Unitarios_Nuevo_Leon_REAL.xlsx: "pieza" aparece como PZA,
@@ -769,6 +825,25 @@ class ComparadorMultiFuente:
         ].map(normalize_unit)
 
     def _match_pool(
+        self,
+        pools,
+        t,
+        u,
+        min_score,
+        scorer,
+        text_col='concepto_norm',
+    ):
+        """Busca con el texto original y con su version de catalogo
+        (consulta_catalogo) y se queda con la mejor coincidencia."""
+        resultado = self._match_pool_texto(pools, t, u, min_score, scorer, text_col)
+        alterna = consulta_catalogo(t)
+        if alterna and alterna != t:
+            otro = self._match_pool_texto(pools, alterna, u, min_score, scorer, text_col)
+            if otro and (resultado is None or otro[0] > resultado[0]):
+                resultado = otro
+        return resultado
+
+    def _match_pool_texto(
         self,
         pools,
         t,

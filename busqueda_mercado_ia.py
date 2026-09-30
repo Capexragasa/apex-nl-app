@@ -36,6 +36,12 @@ import re
 # recomendado para proyectos nuevos y soporta grounding con Google Search.
 MODELO_POR_DEFECTO = "gemini-3.5-flash"
 
+# Si el modelo por defecto no existe para esta API key (404 / NOT_FOUND),
+# se prueba el siguiente en vez de dejar la 4a fuente vacia. Se puede
+# forzar uno con 'gemini_model' en Secrets.
+MODELOS_RESPALDO = ("gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash")
+_modelo_que_funciono = {"nombre": None}
+
 # Menos partidas por lote que revision_ia.TAMANO_LOTE (8): cada partida aqui
 # implica que el modelo dispare una o mas busquedas reales en Google, asi
 # que el prompt y la respuesta esperada son mas pesados por partida.
@@ -152,14 +158,54 @@ def _fuentes_de_respuesta(respuesta):
 
 def _tokens_relevantes(texto):
     """Palabras que ayudan a verificar que la fuente habla del mismo concepto."""
+    import unicodedata
+    plano = "".join(
+        c for c in unicodedata.normalize("NFKD", (texto or "").lower())
+        if not unicodedata.combining(c)
+    )
     return {
-        palabra for palabra in re.findall(r"[a-z0-9]+", (texto or "").lower())
+        palabra for palabra in re.findall(r"[a-z0-9]+", plano)
         if len(palabra) >= 5 and palabra not in {
             "suministro", "instalacion", "colocacion", "precio", "mexico",
             "material", "unidad", "marca", "modelo", "equipo", "servicio",
             "concreto", "limpieza", "general", "pieza", "obra",
         }
     }
+
+
+_SINONIMOS_UNIDAD = {
+    "PZA": {"PZA", "PZ", "PZAS", "PIEZA", "PIEZAS", "UNIDAD", "UND", "C/U", "PZA."},
+    "M2": {"M2", "M²", "METRO CUADRADO", "METROS CUADRADOS", "MT2", "M 2"},
+    "M3": {"M3", "M³", "METRO CUBICO", "METRO CÚBICO", "METROS CUBICOS", "MT3"},
+    "ML": {"ML", "M", "MTS", "MT", "METRO", "METRO LINEAL", "METROS LINEALES", "M.L."},
+    "KG": {"KG", "KILO", "KILOGRAMO", "KILOGRAMOS", "KGS"},
+    "TON": {"TON", "TONELADA", "TONELADAS"},
+    "LT": {"LT", "L", "LITRO", "LITROS"},
+}
+
+
+def _unidad_canonica(unidad):
+    u = str(unidad or "").strip().upper()
+    for canonica, variantes in _SINONIMOS_UNIDAD.items():
+        if u in variantes:
+            return canonica
+    return u
+
+
+def _dominio(url):
+    m = re.match(r"^(?:https?://)?(?:www\.)?([^/:?#]+)", str(url or "").strip().lower())
+    return m.group(1) if m else ""
+
+
+def _consulta_busqueda(descripcion):
+    """Texto de búsqueda sin relleno de obra ("en barda", "por fuera y por
+    dentro"...), para que el buscador encuentre precios de catálogo."""
+    try:
+        from comparador_multifuente_v2 import consulta_catalogo, normalize_text
+        q = consulta_catalogo(normalize_text(descripcion))
+        return q or descripcion
+    except Exception:
+        return descripcion
 
 
 def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
@@ -170,13 +216,7 @@ def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
     esperada = str(item.get("unidad") or "").strip().upper()
     hallada = str(unidad_fuente or "").strip().upper()
     if esperada and hallada and esperada != hallada:
-        sinonimos = {
-            "PZA": {"PIEZA", "UNIDAD", "PZA"},
-            "M2": {"M2", "M²", "METRO CUADRADO"},
-            "M3": {"M3", "M³", "METRO CUBICO", "METRO CÚBICO"},
-            "KG": {"KG", "KILO", "KILOGRAMO"},
-        }
-        if hallada not in sinonimos.get(esperada, {esperada}):
+        if _unidad_canonica(hallada) != _unidad_canonica(esperada):
             return False
     codigos = _codigos_distintivos(original)
     # En equipos con varios códigos, todos deben estar presentes: compartir
@@ -197,47 +237,89 @@ def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
     return True
 
 
+def _modelos_a_probar(modelo=None):
+    preferido = modelo or _leer_secret("gemini_model") or _modelo_que_funciono["nombre"]
+    orden = [preferido] if preferido else []
+    orden += [m for m in MODELOS_RESPALDO if m not in orden]
+    return orden
+
+
+def _es_error_de_modelo(error):
+    texto = str(error).lower()
+    return "not_found" in texto or "404" in texto or "not found" in texto or "is not supported" in texto
+
+
 def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
-    """Intenta el motor principal (Gemini + Google Search grounding).
+    """Motor principal: Gemini + Google Search (grounding).
+
     Regresa {} si no esta disponible o si la llamada falla (revisa
-    ultimo_error() para saber por que)."""
+    ultimo_error() para saber por que).
+
+    Validacion de cada precio (nunca se acepta uno inventado):
+      1. La respuesta debe traer grounding real (Google Search si se
+         ejecuto) y el dominio de la fuente que cita el modelo debe estar
+         entre los sitios que Google consulto. OJO: Google entrega esas
+         URLs como enlaces de redireccion (vertexaisearch.../grounding-
+         api-redirect/...), asi que se compara por DOMINIO (el titulo de
+         cada chunk), no por URL exacta -- compararlas exactas hacia que
+         ningun precio pasara nunca.
+      2. El concepto encontrado debe compartir palabras clave con la
+         partida y la unidad debe ser equivalente (M = ML, pieza = PZA...).
+    """
     cliente = _obtener_cliente(api_key)
     if not cliente or not items:
         return {}
 
-    modelo = modelo or MODELO_POR_DEFECTO
-
     lineas = []
     for it in items:
-        lineas.append(f'ID {it["id"]}: "{it["descripcion"]}" (unidad: {it["unidad"]})')
+        consulta = _consulta_busqueda(it["descripcion"])
+        extra = f' [buscar como: "{consulta}"]' if consulta and consulta.upper() != str(it["descripcion"]).upper() else ""
+        lineas.append(f'ID {it["id"]}: "{it["descripcion"]}" (unidad: {it["unidad"]}){extra}')
 
     prompt = (
-        "Busca en internet (usa la busqueda de Google) precios de mercado "
-        "ACTUALES en Mexico (idealmente Nuevo Leon/Monterrey; si no hay, "
-        "usa el precio nacional promedio) para cada uno de estos materiales "
-        "o servicios de construccion/obra/instalaciones:\n\n"
+        "Eres analista de costos de obra en Monterrey, Nuevo Leon. Usa la "
+        "busqueda de Google para encontrar precios unitarios de mercado "
+        "ACTUALES (2025-2026) en Mexico -- de preferencia Nuevo Leon/"
+        "Monterrey o zona norte; si no hay, precio nacional -- para cada "
+        "partida:\n\n"
         + "\n".join(lineas) +
-        "\n\nPara CADA partida, busca de verdad (no inventes ni calcules de "
-        "memoria) y responde SOLO con un JSON (sin texto alrededor):\n"
-        '{"resultados": [{"id": <mismo id>, "precio_mxn": <numero o null '
-        'si no encontraste nada confiable>, "unidad_encontrada": "<unidad '
-        'del precio que encontraste>", "fuente_nombre": "<nombre del sitio '
-        'o proveedor>", "fuente_url": "<url real de donde salio, o vacio '
-        'si no aplica>", "nota": "<1 frase en espanol, ej. rango de precios '
-        'o contexto>"}, ...]}\n\n'
-        "Solo acepta equivalencia de modelo, marca, capacidad, alcance y unidad; no uses un precio de otro producto parecido. Si no puedes comprobar el producto exacto en la fuente, usa null. "
-        "Si no encuentras un precio real y verificable para una partida, "
-        "pon precio_mxn en null -- NUNCA inventes un numero."
+        "\n\nReglas:\n"
+        "- Precio UNITARIO en pesos mexicanos, en la MISMA unidad de la "
+        "partida (si la fuente da otra unidad, pon null).\n"
+        "- Si la partida dice material y mano de obra, busca precio "
+        "instalado (material + mano de obra), no solo el material.\n"
+        "- Si la fuente da un rango, usa el punto medio y anota el rango.\n"
+        "- Tabuladores, catalogos de precios unitarios, cotizadores y "
+        "tiendas de materiales son fuentes validas.\n"
+        "- Solo acepta el mismo concepto, alcance y unidad; si trae marca "
+        "o modelo, debe ser ese modelo.\n"
+        "- NUNCA inventes ni calcules de memoria: si no encontraste una "
+        "fuente real, precio_mxn = null.\n\n"
+        "Responde SOLO con este JSON (sin texto alrededor):\n"
+        '{"resultados": [{"id": <mismo id>, "precio_mxn": <numero o null>, '
+        '"precio_min": <numero o null>, "precio_max": <numero o null>, '
+        '"descripcion_encontrada": "<concepto tal como aparece en la fuente>", '
+        '"unidad_encontrada": "<unidad del precio en la fuente>", '
+        '"fuente_nombre": "<sitio o proveedor>", '
+        '"fuente_url": "<url de la pagina de donde salio el precio>", '
+        '"nota": "<1 frase: rango, fecha o alcance>"}]}'
     )
 
-    try:
-        respuesta = cliente.models.generate_content(
-            model=modelo,
-            contents=prompt,
-            config={"tools": [{"google_search": {}}]},
-        )
-    except Exception as error:
-        _registrar_error(f"Gemini: {error}")
+    respuesta = None
+    for nombre_modelo in _modelos_a_probar(modelo):
+        try:
+            respuesta = cliente.models.generate_content(
+                model=nombre_modelo,
+                contents=prompt,
+                config={"tools": [{"google_search": {}}], "temperature": 0.1},
+            )
+            _modelo_que_funciono["nombre"] = nombre_modelo
+            break
+        except Exception as error:
+            _registrar_error(f"Gemini ({nombre_modelo}): {error}")
+            if not _es_error_de_modelo(error):
+                return {}
+    if respuesta is None:
         return {}
 
     texto = getattr(respuesta, "text", None)
@@ -250,41 +332,75 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         return {}
 
     fuentes_citadas = _fuentes_de_respuesta(respuesta)
-    url_generica = fuentes_citadas[0]["url"] if fuentes_citadas else ""
+    dominios_consultados = set()
+    for fuente in fuentes_citadas:
+        for valor in (fuente.get("titulo"), fuente.get("url")):
+            dominio = _dominio(valor)
+            if dominio and "vertexaisearch" not in dominio and "googleapis" not in dominio:
+                dominios_consultados.add(dominio)
+
+    def _dominio_consultado(url):
+        d = _dominio(url)
+        return bool(d) and any(
+            d == c or d.endswith("." + c) or c.endswith("." + d)
+            for c in dominios_consultados
+        )
 
     salida = {}
     for r in datos["resultados"]:
         if not isinstance(r, dict) or "id" not in r:
             continue
-        id_ = r["id"]
-        precio = r.get("precio_mxn")
-        try:
-            precio = float(precio) if precio is not None else None
-        except (TypeError, ValueError):
-            precio = None
-        item_original = next((it for it in items if str(it["id"]) == str(id_)), None)
-        descripcion_encontrada = str(r.get("descripcion_encontrada", "") or "")
-        unidad_encontrada = str(r.get("unidad_encontrada", "") or "")
+        id_ = str(r["id"])
+        item_original = next((it for it in items if str(it["id"]) == id_), None)
+        if item_original is None:
+            continue
+
+        def _num(valor):
+            try:
+                n = float(str(valor).replace("$", "").replace(",", "")) if valor not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+            return n if n and n > 0 else None
+
+        precio = _num(r.get("precio_mxn"))
+        precio_min, precio_max = _num(r.get("precio_min")), _num(r.get("precio_max"))
+        if precio is None and precio_min and precio_max:
+            precio = round((precio_min + precio_max) / 2, 2)
+
+        descripcion_encontrada = str(r.get("descripcion_encontrada", "") or "") or str(r.get("nota", "") or "")
+        unidad_encontrada = str(r.get("unidad_encontrada", "") or "") or item_original.get("unidad", "")
         fuente_url = str(r.get("fuente_url", "") or "")
-        # No asociar un precio a la primera URL genérica del lote: puede
-        # corresponder a otra partida distinta.
-        fuente_verificada = bool(fuente_url and any(
-            fuente_url == fuente["url"] for fuente in fuentes_citadas
-        ))
-        equivalente = bool(item_original and _referencia_equivalente(
+        fuente_nombre = str(r.get("fuente_nombre", "") or "")
+
+        fuente_verificada = bool(fuentes_citadas) and (
+            _dominio_consultado(fuente_url) or _dominio_consultado(fuente_nombre)
+        )
+        equivalente = _referencia_equivalente(
             item_original, descripcion_encontrada, unidad_encontrada
-        ))
-        if not fuente_verificada or not equivalente:
+        )
+        motivo = None
+        if precio is not None and not fuente_verificada:
+            motivo = "la fuente citada no está entre los sitios que consultó Google"
+        elif precio is not None and not equivalente:
+            motivo = "el concepto o la unidad de la fuente no coinciden con la partida"
+        if motivo:
             precio = None
-        salida[str(id_)] = {
+
+        nota = str(r.get("nota", "") or "")
+        if precio is not None and precio_min and precio_max:
+            nota = f"Rango ${precio_min:,.0f}–${precio_max:,.0f}. {nota}".strip()
+        salida[id_] = {
             "precio_mxn": precio,
             "unidad_encontrada": unidad_encontrada,
-            "fuente_nombre": str(r.get("fuente_nombre", "") or ""),
+            "descripcion_encontrada": descripcion_encontrada,
+            "fuente_nombre": fuente_nombre,
             "fuente_url": fuente_url if fuente_verificada else "",
-            "nota": (str(r.get("nota", "") or "") if precio is not None else
-                     "Sin precio validado: fuente, concepto o unidad no comprobables."),
+            "nota": nota if precio is not None else (
+                f"Sin precio validado: {motivo}." if motivo else
+                (nota or "La búsqueda no encontró un precio real para esta partida.")
+            ),
             "tiene_dato": precio is not None,
-            "motor": "Gemini (Google Search)",
+            "motor": f"Gemini (Google Search, {_modelo_que_funciono['nombre']})",
         }
     return salida
 
@@ -395,18 +511,26 @@ def _extraer_precio_de_texto(texto, unidad=None):
     # si fuera el del JORNAL, solo porque la palabra "jornal" caia
     # dentro de la ventana de la oracion anterior). Restringir la
     # busqueda a la MISMA oracion evita ese arrastre.
-    palabras_clave = _MAPA_UNIDAD_PALABRAS_CLAVE.get((unidad or "").strip().upper(), [])
+    palabras_clave = _MAPA_UNIDAD_PALABRAS_CLAVE.get(_unidad_canonica(unidad), [])
     if palabras_clave:
         for oracion in _SEPARADOR_ORACIONES.split(texto):
             oracion_lower = oracion.lower()
             if not any(palabra in oracion_lower for palabra in palabras_clave):
                 continue
-            m = _PATRON_PRECIO_PREFIJO.search(oracion) or _PATRON_PRECIO_SUFIJO.search(oracion)
-            if m:
+            encontrados = list(_PATRON_PRECIO_PREFIJO.finditer(oracion)) or list(
+                _PATRON_PRECIO_SUFIJO.finditer(oracion)
+            )
+            valores = []
+            for m in encontrados[:2]:
                 try:
-                    return float(m.group(1).replace(",", ""))
+                    valores.append(float(m.group(1).replace(",", "")))
                 except ValueError:
-                    continue
+                    pass
+            if valores:
+                # "entre $160 y $200 por m2" -> punto medio del rango.
+                if len(valores) == 2 and 0 < valores[0] < valores[1] <= valores[0] * 3:
+                    return round(sum(valores) / 2, 2)
+                return valores[0]
 
         # La unidad SI esta en el mapa (se sabe reconocerla) pero
         # ninguna oracion con precio la menciono -- no se adivina con
@@ -477,8 +601,13 @@ def _buscar_precio_tavily_item(item, api_key=None):
     if not key:
         return None
 
+    unidad_texto = {
+        "M2": "por m2", "M3": "por m3", "ML": "por metro lineal", "M": "por metro lineal",
+        "PZA": "por pieza", "KG": "por kg",
+    }.get(str(item["unidad"]).strip().upper(), str(item["unidad"]))
     consulta = (
-        f'precio "{item["descripcion"]}" {item["unidad"]} México MXN'
+        f'precio unitario {_consulta_busqueda(item["descripcion"])} '
+        f'{unidad_texto} México 2026 MXN'
     )
     try:
         resp = requests.post(
@@ -505,7 +634,7 @@ def _buscar_precio_tavily_item(item, api_key=None):
         if (not url
                 or any(x in titulo.lower() for x in ("calculadora", "blog", "foro", "presupuesto pdf"))
                 or any(x in url.lower() for x in ("scribd.com", "pinterest.", "facebook.", "reddit."))
-                or not _referencia_equivalente(item, titulo, item.get("unidad"))):
+                or not _referencia_equivalente(item, f"{titulo} {contenido}", item.get("unidad"))):
             continue
         # El resumen generado por el buscador puede atribuir el precio de
         # otra página a esta partida. Extraerlo solo del fragmento de la URL.
