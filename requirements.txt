@@ -10,3 +10,4 @@ openai
 google-genai
 plotly
 requests
+xlsxwriter
