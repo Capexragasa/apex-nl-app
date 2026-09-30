@@ -23,8 +23,12 @@ from __future__ import annotations
 import datetime as _dt
 import io
 
-import xlsxwriter
-from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
+try:
+    import xlsxwriter
+    from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
+    XLSXWRITER_DISPONIBLE = True
+except ImportError:  # el servidor aún no instala requirements.txt
+    XLSXWRITER_DISPONIBLE = False
 
 import validacion_referencias as v
 
@@ -64,6 +68,9 @@ def _clasif(precio, ref):
 
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") -> bytes:
+    if not XLSXWRITER_DISPONIBLE:
+        import exportar_revision_respaldo
+        return exportar_revision_respaldo.generar_excel(filas, proveedor=proveedor, proyecto=proyecto)
     buffer = io.BytesIO()
     wb = xlsxwriter.Workbook(buffer, {"in_memory": True, "nan_inf_to_errors": True})
 
