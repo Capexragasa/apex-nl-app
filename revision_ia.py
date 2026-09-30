@@ -81,6 +81,13 @@ def _registrar_error(error, proveedor=None):
     _ultimo_error["proveedor"] = proveedor
 
 
+def reiniciar_error():
+    """Borra el error guardado: se llama al inicio de cada revisión para
+    no mostrar errores viejos de una corrida anterior."""
+    _ultimo_error["mensaje"] = None
+    _ultimo_error["proveedor"] = None
+
+
 def ultimo_error():
     """Regresa {'mensaje': str|None, 'proveedor': str|None} con el
     ultimo error real que dio la revision con IA en esta sesion, o

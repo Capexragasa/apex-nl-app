@@ -67,7 +67,8 @@ def _clasif(precio, ref):
     return "EN MERCADO"
 
 
-def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") -> bytes:
+def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
+                  revision_cantidades: dict | None = None) -> bytes:
     if not XLSXWRITER_DISPONIBLE:
         import exportar_revision_respaldo
         return exportar_revision_respaldo.generar_excel(filas, proveedor=proveedor, proyecto=proyecto)
@@ -247,7 +248,81 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") ->
     ws.fit_to_pages(1, 0)
 
     # ==================================================================
-    # Hoja 2: Por fuente (semáforo por fuente calculado con fórmula)
+    # Hoja 2: Cantidades (aritmética, escenarios de volumen, alcances)
+    # ==================================================================
+    if revision_cantidades:
+        wc = wb.add_worksheet("Cantidades")
+        wc.merge_range(0, 0, 0, 7, "Revisión de cantidades y aritmética", f_titulo)
+        wc.set_row(0, 26)
+        wc.write(1, 0, "Diferencias SUJETAS A ACLARACIÓN con el generador de volúmenes del proveedor; "
+                       "no son ahorros confirmados. Azul = dato de la cotización.", f_sub)
+        cab_a = ["#", "Concepto", "Unidad", "Cantidad", "P.U.", "Importe declarado",
+                 "Cantidad × P.U.", "Diferencia"]
+        for c, t in enumerate(cab_a):
+            wc.write(3, c, t, f_cab)
+        r = 4
+        for a in revision_cantidades["aritmetica"]:
+            R = r + 1
+            wc.write(r, 0, a["partida"], f_centro)
+            wc.write(r, 1, a["concepto"], f_txt)
+            wc.write(r, 2, a["unidad"], f_centro)
+            wc.write_number(r, 3, a["cantidad"] or 0, f_input_num)
+            wc.write_number(r, 4, a["precio_unitario"] or 0, f_input_mon)
+            if a["importe_declarado"] is not None:
+                wc.write_number(r, 5, a["importe_declarado"], f_input_mon)
+            else:
+                wc.write_blank(r, 5, None, f_input_mon)
+            wc.write_formula(r, 6, f"=D{R}*E{R}", f_mon, a["importe_calculado"] or 0)
+            wc.write_formula(r, 7, f'=IF(F{R}="","",F{R}-G{R})', f_mon, a["diferencia"] if a["diferencia"] is not None else "")
+            r += 1
+        wc.write(r, 1, "TOTAL", f_bold)
+        wc.write_formula(r, 5, f"=SUM(F5:F{r})", f_mon_neg,
+                         sum(a["importe_declarado"] or 0 for a in revision_cantidades["aritmetica"]))
+        wc.write_formula(r, 6, f"=SUM(G5:G{r})", f_mon_neg, revision_cantidades["total_calculado"])
+        wc.write_formula(r, 7, f"=F{r + 1}-G{r + 1}", f_mon_neg,
+                         sum(a["importe_declarado"] or 0 for a in revision_cantidades["aritmetica"])
+                         - revision_cantidades["total_calculado"])
+        r += 2
+        for h in revision_cantidades["hallazgos"]:
+            wc.merge_range(r, 0, r, 7, f"[{h['nivel']}] {h['tipo']} — partida {h['partidas']}",
+                           fmt(bold=True, bg_color={"REVISAR": ROJO_F, "CONFIRMAR": AMBAR_F}.get(h["nivel"], VERDE_F)))
+            r += 1
+            wc.merge_range(r, 0, r, 7, h["detalle"], f_txt)
+            wc.set_row(r, 32)
+            r += 1
+            if h["escenarios"]:
+                wc.merge_range(r, 0, r, 2, "Escenario", f_cab)
+                for c, t in zip(range(3, 8), ["Fórmula", "m² esperados", "m² cotizados",
+                                              "Diferencia m²", "Importe sujeto a aclaración"]):
+                    wc.write(r, c, t, f_cab)
+                r += 1
+                cant = next((a["cantidad"] for a in revision_cantidades["aritmetica"]
+                             if str(a["partida"]) == str(h["partidas"])), 0) or 0
+                pu = next((a["precio_unitario"] for a in revision_cantidades["aritmetica"]
+                           if str(a["partida"]) == str(h["partidas"])), 0) or 0
+                for e in h["escenarios"]:
+                    R = r + 1
+                    wc.merge_range(r, 0, r, 2, e["nombre"], f_txt)
+                    wc.write(r, 3, e["formula"], f_centro)
+                    wc.write_number(r, 4, e["m2"], fmt(num_format="#,##0.00"))
+                    wc.write_number(r, 5, cant, f_input_num)
+                    wc.write_formula(r, 6, f"=F{R}-E{R}", fmt(num_format="#,##0.00"), e["dif_m2"])
+                    wc.write_formula(r, 7, f"=MAX(0,G{R})*{pu}", f_mon, e["importe"])
+                    r += 1
+            r += 1
+        wc.merge_range(r, 0, r, 7, "Alcances e impuestos a confirmar por escrito", f_cab)
+        r += 1
+        for a in revision_cantidades["alcances_confirmar"]:
+            wc.merge_range(r, 0, r, 7, "• " + a, f_txt)
+            r += 1
+        for c, ancho in enumerate([5, 46, 8, 16, 14, 17, 16, 22]):
+            wc.set_column(c, c, ancho)
+        wc.hide_gridlines(2)
+        wc.set_landscape()
+        wc.fit_to_pages(1, 0)
+
+    # ==================================================================
+    # Hoja 3: Por fuente (semáforo por fuente calculado con fórmula)
     # ==================================================================
     wf = wb.add_worksheet("Por fuente")
     cab_f = ["#", "Concepto", "Unidad", "P.U. cotizado"]

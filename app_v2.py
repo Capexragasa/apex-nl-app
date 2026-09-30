@@ -48,6 +48,7 @@ from comparador_multifuente_v2 import (
 import ajuste_inflacion
 import revision_ia
 import validacion_referencias as validacion
+import revision_cantidades
 import exportar_revision
 import busqueda_mercado_ia
 
@@ -2355,6 +2356,8 @@ if archivo is not None:
                 filas = []
                 fila_registros = []
                 partidas_sin_descripcion = 0
+                revision_ia.reiniciar_error()
+                busqueda_mercado_ia.reiniciar_error()
 
                 for _, renglon in cotizacion.iterrows():
 
@@ -2488,15 +2491,38 @@ if archivo is not None:
 
                         resultados_revision = {}
 
+                        # Ahorro de cuota: un veredicto ya obtenido para el mismo
+                        # concepto + candidato + fuente se reutiliza en esta
+                        # sesión en vez de volver a preguntarle a Gemini.
+                        cache_revision = st.session_state.setdefault("veredictos_ia", {})
+
+                        def _clave_revision(item):
+                            return (
+                                str(item["descripcion_cotizada"]).casefold().strip(),
+                                str(item["unidad"]).casefold().strip(),
+                                str(item["descripcion_candidato"]).casefold().strip(),
+                                item["fuente"],
+                            )
+
+                        pendientes_revision = []
+                        for item in items_revision:
+                            guardado = cache_revision.get(_clave_revision(item))
+                            if guardado:
+                                resultados_revision[item["id"]] = guardado
+                            else:
+                                pendientes_revision.append(item)
+
                         for inicio in range(
-                            0, len(items_revision), revision_ia.TAMANO_LOTE
+                            0, len(pendientes_revision), revision_ia.TAMANO_LOTE
                         ):
-                            lote = items_revision[
+                            lote = pendientes_revision[
                                 inicio:inicio + revision_ia.TAMANO_LOTE
                             ]
-                            resultados_revision.update(
-                                revision_ia.revisar_coincidencias_debiles_lote(lote)
-                            )
+                            respuesta_revision = revision_ia.revisar_coincidencias_debiles_lote(lote)
+                            resultados_revision.update(respuesta_revision)
+                            for item in lote:
+                                if item["id"] in respuesta_revision:
+                                    cache_revision[_clave_revision(item)] = respuesta_revision[item["id"]]
 
                         for item in items_revision:
                             veredicto = resultados_revision.get(item["id"])
@@ -3231,35 +3257,84 @@ if archivo is not None:
                 # la cuota") en vez de solo un mensaje genérico -- así se
                 # puede saber la causa real en lugar de adivinar.
                 # ----------------------------------------------------------
-                _error_revision = revision_ia.ultimo_error() if usar_ia else None
+                # ----------------------------------------------------------
+                # ESTADO DE LA IA, visible (antes quedaba escondido en un
+                # recuadro cerrado): dice en palabras simples si la revisión
+                # y la búsqueda con IA de verdad corrieron y, si no, por qué.
+                # ----------------------------------------------------------
+                def _causa_simple(mensaje):
+                    t = str(mensaje or "").lower()
+                    if any(x in t for x in ("429", "resource_exhausted", "quota", "rate limit")):
+                        return ("se acabó la cuota gratuita de Gemini por ahora (se renueva cada día; "
+                                "también hay límite por minuto)")
+                    if any(x in t for x in ("api key not valid", "api_key_invalid", "invalid api key", "401")):
+                        return "la clave de Gemini (gemini_api_key) no es válida"
+                    if "403" in t or "permission" in t or "billing" in t:
+                        return ("Google no permite esta función con tu clave (puede requerir facturación "
+                                "activada para la búsqueda con Google)")
+                    if any(x in t for x in ("404", "not_found", "not found")):
+                        return "el modelo de Gemini no está disponible para tu clave"
+                    if "ningún precio pasó la validación" in t:
+                        return "Gemini sí buscó, pero ningún precio tenía fuente y frase comprobables"
+                    if "json" in t:
+                        return "Gemini respondió en un formato que no se pudo leer"
+                    return str(mensaje)[:200]
+
+                _n_revisadas = sum(
+                    1 for f in filas for clave in ("nl", "cdmx", "historico")
+                    if (f["_evaluaciones"][clave].get("revision_ia"))
+                )
+                _n_por_revisar = sum(
+                    1 for f in filas for clave in ("nl", "cdmx", "historico")
+                    if f["_evaluaciones"][clave]["estado"] not in (validacion.SIN_DATO,)
+                )
+                _motores = [
+                    str((registro.get("busqueda_ia") or {}).get("motor", ""))
+                    for registro in fila_registros
+                    if (registro.get("busqueda_ia") or {}).get("tiene_dato")
+                ]
+                _n_gemini = sum(1 for m in _motores if m.startswith("Gemini"))
+                _n_tavily = sum(1 for m in _motores if m.startswith("Tavily"))
+                _error_revision = (revision_ia.ultimo_error() or {}).get("mensaje") if usar_ia else None
                 _error_busqueda = (
-                    busqueda_mercado_ia.ultimo_error()
-                    if busqueda_ia_disponible and buscar_precios_web
-                    else None
+                    (busqueda_mercado_ia.ultimo_error() or {}).get("mensaje")
+                    if busqueda_ia_disponible and buscar_precios_web else None
                 )
 
-                if (
-                    (_error_revision and _error_revision.get("mensaje"))
-                    or (_error_busqueda and _error_busqueda.get("mensaje"))
-                ):
+                with st.container(border=True):
+                    st.markdown("**Estado de la IA en esta revisión**")
+                    if not usar_ia:
+                        st.warning("Revisión con IA: **apagada**. Actívala en la barra lateral; "
+                                   "sin ella casi ninguna referencia puede quedar VALIDADA.")
+                    elif _n_revisadas:
+                        st.success(f"Revisión con IA: activa, {_n_revisadas} referencia(s) revisada(s) por la IA.")
+                        if _error_revision:
+                            st.caption(f"Algunas no se revisaron: {_causa_simple(_error_revision)}.")
+                    else:
+                        st.error("Revisión con IA: **no se pudo hacer**. Causa: "
+                                 f"{_causa_simple(_error_revision) if _error_revision else 'la IA no respondió'}.")
 
-                    with st.expander(
-                        "⚠️ La IA tuvo errores durante esta revisión "
-                        "(clic para ver el detalle técnico)"
-                    ):
+                    if not busqueda_ia_disponible:
+                        st.warning("Búsqueda de precios con IA: no configurada (falta gemini_api_key en Secrets).")
+                    elif not buscar_precios_web:
+                        st.info("Búsqueda de precios con IA: apagada en la barra lateral.")
+                    elif _n_gemini:
+                        st.success(f"Búsqueda de precios con IA: Gemini encontró {_n_gemini} precio(s) con fuente.")
+                        if _n_tavily:
+                            st.caption(f"Otros {_n_tavily} vinieron del buscador de respaldo (orientativos).")
+                    else:
+                        _txt = ("Búsqueda de precios con IA: **Gemini no entregó precios**. Causa: "
+                                f"{_causa_simple(_error_busqueda) if _error_busqueda else 'no encontró fuentes comprobables'}.")
+                        if _n_tavily:
+                            _txt += f" Se usaron {_n_tavily} precio(s) del buscador de respaldo, solo como orientativos."
+                        st.error(_txt)
 
-                        if _error_revision and _error_revision.get("mensaje"):
-                            st.caption(
-                                f"Revisión con IA "
-                                f"({_error_revision.get('proveedor') or '?'}): "
-                                f"{_error_revision['mensaje']}"
-                            )
-
-                        if _error_busqueda and _error_busqueda.get("mensaje"):
-                            st.caption(
-                                f"Búsqueda en internet (4ª fuente): "
-                                f"{_error_busqueda['mensaje']}"
-                            )
+                    if _error_revision or _error_busqueda:
+                        with st.expander("Detalle técnico (para soporte)"):
+                            if _error_revision:
+                                st.code(f"Revisión IA: {_error_revision}", language=None)
+                            if _error_busqueda:
+                                st.code(f"Búsqueda IA: {_error_busqueda}", language=None)
 
                 # Precio caro/en rango/bajo -- pedido explícito de dirección:
                 # ALTO (caro) = rojo, EN MERCADO (en rango) = amarillo,
@@ -3348,10 +3423,10 @@ if archivo is not None:
                 # ------------------------------------------------------------
                 st.markdown("#### Comparativo por partida")
                 st.caption(
-                    "Cada fuente se compara por separado, sin promediar. El precio solo se "
-                    "pinta (🔴 alto · 🟡 ±5 % · 🟢 bajo) cuando la referencia está VALIDADA. "
-                    "Gris en cursiva = orientativa (NO CONCLUYENTE o POR CONFIRMAR). "
-                    "Tachada = RECHAZADA (no entra en ningún cálculo)."
+                    "Precio de cada fuente: 🔴 cotizado caro · 🟡 en mercado (±5 %) · 🟢 cotizado "
+                    "barato, solo cuando la Confiabilidad dice VALIDADA. Gris en cursiva = "
+                    "orientativo (POR CONFIRMAR / NO CONCLUYENTE). Tachado = RECHAZADA por la IA. "
+                    "El precio sugerido sale de una sola fuente validada (entre paréntesis)."
                 )
 
                 _FUENTES = (("historico", "Histórico"), ("nl", "Nuevo León"),
@@ -3374,25 +3449,31 @@ if archivo is not None:
                     evs = f["_evaluaciones"]
                     fin_ = f["_final"]
                     fila_v = {
-                        "#": f.get("Partida"),
+                        "# Concepto": f.get("Partida"),
                         "Descripción": f.get("Concepto") or "Descripción no detectada",
                         "Unidad": f.get("Unidad"),
                         "Cantidad": f.get("Cantidad"),
-                        "P.U. cotizado": _dinero(f.get("Precio cotizado")),
-                        "Importe": _dinero(
+                        "Precio": _dinero(f.get("Precio cotizado")),
+                        "Precio total": _dinero(
                             f.get("Importe") if pd.notna(f.get("Importe")) else
                             (convertir_numero(f.get("Cantidad")) or 0) * f.get("Precio cotizado")
                         ),
                     }
                     estilo_v = {}
+                    # Misma estructura de siempre por fuente: Descripción,
+                    # Precio y Confiabilidad (que ahora dice si la referencia
+                    # quedó VALIDADA, POR CONFIRMAR, RECHAZADA...).
+                    _NOMBRE_COL = {"historico": ("histórico Ragasa", "histórico"),
+                                   "nl": ("Nuevo León", "Nuevo León"),
+                                   "cdmx": ("CDMX", "CDMX"), "ia": ("IA", "IA")}
                     for clave, nombre in _FUENTES:
                         ev = evs[clave]
-                        col_p, col_e, col_d = f"{nombre} · P.U.", f"{nombre} · estado", f"{nombre} · %"
+                        _largo, _corto = _NOMBRE_COL[clave]
+                        col_desc = f"Descripción {_largo}"
+                        col_p, col_e = f"Precio {_corto}", f"Confiabilidad {_corto}"
+                        fila_v[col_desc] = ev.get("descripcion") or "—"
                         fila_v[col_p] = _dinero(ev["precio_referencia"])
-                        fila_v[col_e] = ev["estado"]
-                        fila_v[col_d] = (
-                            f"{ev['diferencia_pct']:+.1f}%" if ev["diferencia_pct"] is not None else "—"
-                        )
+                        fila_v[col_e] = ev["estado"] if ev["estado"] != validacion.SIN_DATO else "—"
                         if ev["estado"] == validacion.VALIDADA:
                             estilo_v[col_p] = {
                                 "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
@@ -3428,15 +3509,16 @@ if archivo is not None:
                         ]
                         if _pistas:
                             _texto_final += " (orientativo: " + ", ".join(_pistas) + ")"
-                    fila_v["Semáforo final"] = _texto_final
-                    fila_v["Validada en"] = fin_["fuentes_validadas"] or "—"
-                    fila_v["Negociar contra"] = fin_["referencia_negociacion"] or "—"
-                    fila_v["P.U. negociación"] = _dinero(fin_["precio_negociacion"])
-                    fila_v["% vs negociación"] = (
+                    fila_v["Semáforo"] = _texto_final
+                    fila_v["Precio sugerido"] = (
+                        f"{_dinero(fin_['precio_negociacion'])} ({fin_['referencia_negociacion']})"
+                        if fin_["precio_negociacion"] else "—"
+                    )
+                    fila_v["% diferencia"] = (
                         f"{fin_['diferencia_pct']:+.1f}%" if fin_["diferencia_pct"] is not None else "—"
                     )
                     fila_v["Ahorro potencial"] = _dinero(fin_["ahorro_potencial"])
-                    estilo_v["Semáforo final"] = {
+                    estilo_v["Semáforo"] = {
                         "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 700",
                         "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 700",
                         "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 700",
@@ -3457,6 +3539,48 @@ if archivo is not None:
                     height=min(680, 48 + 36 * len(comparativo_vista)),
                     hide_index=True,
                 )
+
+                # ----------------------------------------------------------
+                # Revisión de cantidades y aritmética: un buen precio unitario
+                # no sirve si la cantidad está inflada (caso barda: 59 m² de
+                # estuco a dos caras sobre 16 m² de muro).
+                # ----------------------------------------------------------
+                revision_cant = revision_cantidades.revisar(
+                    cotizacion.to_dict("records"),
+                    total_declarado=metadatos.get("subtotal_declarado"),
+                    contexto=f"{archivo.name} {proyecto or ''}",
+                )
+                st.markdown("#### Revisión de cantidades y aritmética")
+                if revision_cant["partidas_con_error"] == 0 and revision_cant["total_ok"]:
+                    st.success(
+                        f"Aritmética correcta: cantidad × P.U. cuadra en todas las partidas y el total "
+                        f"es ${revision_cant['total_calculado']:,.2f}."
+                    )
+                else:
+                    st.error(
+                        f"Aritmética con diferencias: {revision_cant['partidas_con_error']} partida(s) no cuadran "
+                        f"o el total no coincide (calculado ${revision_cant['total_calculado']:,.2f})."
+                    )
+                    st.dataframe(
+                        pd.DataFrame([a for a in revision_cant["aritmetica"] if not a["ok"]]),
+                        use_container_width=True, hide_index=True,
+                    )
+                _iconos = {"REVISAR": "🔴", "CONFIRMAR": "🟡", "OK": "🟢"}
+                for h in revision_cant["hallazgos"]:
+                    st.markdown(f"{_iconos.get(h['nivel'], '•')} **{h['tipo']}** (partida {h['partidas']}): {h['detalle']}")
+                    if h["escenarios"]:
+                        st.dataframe(
+                            pd.DataFrame([{
+                                "Escenario": e["nombre"], "Fórmula": e["formula"], "m² esperados": e["m2"],
+                                "Diferencia vs cotizado (m²)": e["dif_m2"],
+                                "Importe sujeto a aclaración": f"${e['importe']:,.2f}",
+                            } for e in h["escenarios"]]),
+                            use_container_width=True, hide_index=True,
+                        )
+                with st.expander("Alcances e impuestos a confirmar con el proveedor"):
+                    for a in revision_cant["alcances_confirmar"]:
+                        st.markdown(f"- {a}")
+                    st.caption("No son omisiones comprobadas: confirmar por escrito antes de emitir la orden de compra.")
 
                 with st.expander("Evidencia por fuente (por qué cada referencia cuenta o no)"):
                     evidencia = []
@@ -3486,9 +3610,10 @@ if archivo is not None:
                 nombre_proveedor = re.sub(r"[^a-zA-Z0-9_-]+", "_", proveedor.strip() if proveedor else "proveedor")
                 nombre_proyecto = re.sub(r"[^a-zA-Z0-9_-]+", "_", proyecto.strip() if proyecto else "proyecto")
                 st.download_button(
-                    "Descargar revisión en Excel (Resumen, Por fuente, Evidencia, Metodología)",
+                    "Descargar revisión en Excel (Resumen, Cantidades, Por fuente, Evidencia, Metodología)",
                     data=exportar_revision.generar_excel(
-                        tabla.to_dict("records"), proveedor=proveedor, proyecto=proyecto
+                        tabla.to_dict("records"), proveedor=proveedor, proyecto=proyecto,
+                        revision_cantidades=revision_cant,
                     ),
                     file_name=f"revision_{nombre_proveedor}_{nombre_proyecto}.xlsx",
                     mime=(

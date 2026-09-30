@@ -65,6 +65,12 @@ def _registrar_error(error):
     _ultimo_error["mensaje"] = str(error)
 
 
+def reiniciar_error():
+    """Borra el error guardado: se llama al inicio de cada revisión para
+    no mostrar errores viejos de una corrida anterior."""
+    _ultimo_error["mensaje"] = None
+
+
 def ultimo_error():
     """Regresa {'mensaje': str|None} con el ultimo error real que dio la
     busqueda en internet con IA en esta sesion, o None si no ha habido

@@ -85,7 +85,7 @@ def _semaforo_cf(ws, rango):
         )
 
 
-def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") -> bytes:  # respaldo openpyxl
+def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "", **_ignorados) -> bytes:  # respaldo openpyxl
     """filas: los dicts de la app (con '_evaluaciones' y '_final')."""
     wb = Workbook()
 
