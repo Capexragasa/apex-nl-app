@@ -633,7 +633,10 @@ def _buscar_precio_tavily_item(item, api_key=None):
         url = str(fuente.get("url") or "")
         if (not url
                 or any(x in titulo.lower() for x in ("calculadora", "blog", "foro", "presupuesto pdf"))
-                or any(x in url.lower() for x in ("scribd.com", "pinterest.", "facebook.", "reddit."))
+                or any(x in url.lower() for x in (
+                    "scribd.com", "pinterest.", "facebook.", "reddit.", "tiktok.",
+                    "youtube.", "youtu.be", "instagram.", "twitter.", "x.com/",
+                ))
                 or not _referencia_equivalente(item, f"{titulo} {contenido}", item.get("unidad"))):
             continue
         # El resumen generado por el buscador puede atribuir el precio de

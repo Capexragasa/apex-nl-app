@@ -2671,23 +2671,42 @@ if archivo is not None:
                         es_referencia_web = str(
                             busqueda_ia.get("motor", "")
                         ).startswith("Tavily")
-                        banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
-                        _clasificacion_ia = clasificar(precio, banda_baja_ia, banda_alta_ia)
-                        _diff_ia = round(
-                            (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
+                        # Prueba real (barda): Tavily trajo $9,500/m² para un
+                        # muro de $550 y $218,693 por un castillo de $400 --
+                        # números de otra partida o de un total dentro del
+                        # fragmento. Un precio web a más de 3× (o menos de
+                        # 1/3) del cotizado casi siempre es otra escala; con
+                        # Gemini el margen es 5×.
+                        _factor_escala = 3.0 if es_referencia_web else 5.0
+                        _fuera_de_escala = not (
+                            precio / _factor_escala <= precio_mercado_ia <= precio * _factor_escala
                         )
-                        # La columna IA siempre se pinta con su semáforo. Un
-                        # precio de Gemini (fuente y concepto validados) vota
-                        # en el resultado final; uno de Tavily (fragmento de
-                        # página) solo vota si ninguna otra fuente tiene dato.
-                        _resultado_ia = _clasificacion_ia
-                        if es_referencia_web:
-                            registro["ia_solo_respaldo"] = _clasificacion_ia
+                        if _fuera_de_escala:
+                            busqueda_ia = dict(busqueda_ia)
+                            busqueda_ia["nota"] = (
+                                f"Se descartó ${precio_mercado_ia:,.2f}: fuera de escala "
+                                "frente al precio cotizado (probablemente otra unidad o un total)."
+                            )
+                            busqueda_ia["tiene_dato"] = False
+                            _resultado_ia = "todavía no hay"
                         else:
-                            clasificacion_ia_mercado = _clasificacion_ia
+                            banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
+                            _clasificacion_ia = clasificar(precio, banda_baja_ia, banda_alta_ia)
+                            _diff_ia = round(
+                                (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
+                            )
+                            # La columna IA se pinta con su semáforo. Solo un
+                            # precio de Gemini (fuente y concepto validados)
+                            # vota en el resultado final; un fragmento web de
+                            # Tavily se muestra como referencia, sin votar.
+                            _resultado_ia = _clasificacion_ia
+                            if not es_referencia_web:
+                                clasificacion_ia_mercado = _clasificacion_ia
 
                         fila["Motor IA"] = busqueda_ia.get("motor", "")
-                        fila["Precio mercado (IA internet)"] = precio_mercado_ia
+                        fila["Precio mercado (IA internet)"] = (
+                            None if _fuera_de_escala else precio_mercado_ia
+                        )
                         nombre_fuente = busqueda_ia.get("fuente_nombre") or ""
                         url_fuente = busqueda_ia.get("fuente_url") or ""
                         fila["Fuente IA (internet)"] = (
@@ -2866,9 +2885,6 @@ if archivo is not None:
                         clasificaciones.append(clasificacion_ia_mercado)
                         if busqueda_ia and busqueda_ia.get("precio_mxn"):
                             referencias_precio.append(convertir_numero(busqueda_ia["precio_mxn"]))
-                    elif registro.get("ia_solo_respaldo") and not clasificaciones:
-                        clasificaciones.append(registro["ia_solo_respaldo"])
-                        referencias_precio.append(convertir_numero(busqueda_ia["precio_mxn"]))
 
                     # ------------------------------------------------------------
                     # Los 4 resultados finales (uno por fuente) JUNTOS y PEGADOS
