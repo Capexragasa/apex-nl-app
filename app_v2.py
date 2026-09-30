@@ -2546,7 +2546,7 @@ if archivo is not None:
                     )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = ("fuente-verificada-v5", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        clave = ("fuente-verificada-v6", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                         if clave in cache_precios_ia:
                             resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
                         else:
@@ -2567,7 +2567,7 @@ if archivo is not None:
                         for item in lote:
                             respuesta = respuesta_lote.get(item["id"])
                             if respuesta and respuesta.get("tiene_dato") and respuesta.get("precio_mxn"):
-                                clave = ("fuente-verificada-v5", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                                clave = ("fuente-verificada-v6", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                                 cache_precios_ia[clave] = respuesta
 
                         completadas = min(
@@ -2671,19 +2671,20 @@ if archivo is not None:
                         es_referencia_web = str(
                             busqueda_ia.get("motor", "")
                         ).startswith("Tavily")
+                        banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
+                        _clasificacion_ia = clasificar(precio, banda_baja_ia, banda_alta_ia)
+                        _diff_ia = round(
+                            (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
+                        )
+                        # La columna IA siempre se pinta con su semáforo. Un
+                        # precio de Gemini (fuente y concepto validados) vota
+                        # en el resultado final; uno de Tavily (fragmento de
+                        # página) solo vota si ninguna otra fuente tiene dato.
+                        _resultado_ia = _clasificacion_ia
                         if es_referencia_web:
-                            # El fragmento contiene un precio, pero no prueba
-                            # por sí solo que coincidan alcance, fecha e impuestos.
-                            _resultado_ia = "REFERENCIA WEB"
+                            registro["ia_solo_respaldo"] = _clasificacion_ia
                         else:
-                            banda_baja_ia, banda_alta_ia = banda_en_mercado(precio_mercado_ia)
-                            clasificacion_ia_mercado = clasificar(
-                                precio, banda_baja_ia, banda_alta_ia
-                            )
-                            _resultado_ia = clasificacion_ia_mercado
-                            _diff_ia = round(
-                                (precio - precio_mercado_ia) / precio_mercado_ia * 100, 1
-                            )
+                            clasificacion_ia_mercado = _clasificacion_ia
 
                         fila["Motor IA"] = busqueda_ia.get("motor", "")
                         fila["Precio mercado (IA internet)"] = precio_mercado_ia
@@ -2864,7 +2865,10 @@ if archivo is not None:
                     if clasificacion_ia_mercado:
                         clasificaciones.append(clasificacion_ia_mercado)
                         if busqueda_ia and busqueda_ia.get("precio_mxn"):
-                            referencias_precio.append(busqueda_ia["precio_mxn"])
+                            referencias_precio.append(convertir_numero(busqueda_ia["precio_mxn"]))
+                    elif registro.get("ia_solo_respaldo") and not clasificaciones:
+                        clasificaciones.append(registro["ia_solo_respaldo"])
+                        referencias_precio.append(convertir_numero(busqueda_ia["precio_mxn"]))
 
                     # ------------------------------------------------------------
                     # Los 4 resultados finales (uno por fuente) JUNTOS y PEGADOS
