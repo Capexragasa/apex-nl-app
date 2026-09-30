@@ -310,6 +310,7 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         '"unidad_encontrada": "<unidad del precio en la fuente>", '
         '"fuente_nombre": "<sitio o proveedor>", '
         '"fuente_url": "<url de la pagina de donde salio el precio>", '
+        '"fragmento": "<frase textual de la fuente donde aparecen el concepto, el precio y la unidad>", '
         '"nota": "<1 frase: rango, fecha o alcance>"}]}'
     )
 
@@ -386,8 +387,37 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         equivalente = _referencia_equivalente(
             item_original, descripcion_encontrada, unidad_encontrada
         )
+        fragmento = str(r.get("fragmento", "") or "")
         motivo = None
-        if precio is not None and not fuente_verificada:
+        if precio is not None:
+            # Regla 4: el precio debe estar en la MISMA frase que el concepto
+            # y la unidad. Sin esa frase no hay vínculo comprobable.
+            numeros_fragmento = {
+                float(n.replace(",", ""))
+                for n in re.findall(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?", fragmento)
+            }
+            candidatos_precio = {precio, precio_min, precio_max} - {None}
+            if not fragmento:
+                motivo = "la IA no citó la frase de la fuente donde aparece el precio"
+            elif not (
+                any(abs(n - c) < 0.51 for n in numeros_fragmento for c in candidatos_precio)
+                # "entre $160 y $200" y la IA reporta el punto medio ($180)
+                or any(
+                    abs((a + b_) / 2 - precio) < 0.51
+                    for a in numeros_fragmento for b_ in numeros_fragmento if a < b_
+                )
+            ):
+                motivo = "el precio no aparece en la frase citada"
+            elif not _referencia_equivalente(item_original, fragmento, unidad_encontrada):
+                motivo = "la frase citada no menciona el mismo concepto"
+            elif _MAPA_UNIDAD_PALABRAS_CLAVE.get(_unidad_canonica(item_original.get("unidad"))) and not any(
+                palabra in fragmento.lower()
+                for palabra in _MAPA_UNIDAD_PALABRAS_CLAVE[_unidad_canonica(item_original.get("unidad"))]
+            ) and _unidad_canonica(unidad_encontrada) != _unidad_canonica(item_original.get("unidad")):
+                motivo = "la frase citada no indica la misma unidad"
+        if motivo:
+            pass
+        elif precio is not None and not fuente_verificada:
             motivo = "la fuente citada no está entre los sitios que consultó Google"
         elif precio is not None and not equivalente:
             motivo = "el concepto o la unidad de la fuente no coinciden con la partida"
@@ -399,6 +429,8 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
             nota = f"Rango ${precio_min:,.0f}–${precio_max:,.0f}. {nota}".strip()
         salida[id_] = {
             "precio_mxn": precio,
+            "fragmento": fragmento[:300],
+            "verificado": precio is not None,
             "unidad_encontrada": unidad_encontrada,
             "descripcion_encontrada": descripcion_encontrada,
             "fuente_nombre": fuente_nombre,
@@ -516,9 +548,13 @@ _MAPA_UNIDAD_PALABRAS_CLAVE = {
 _SEPARADOR_ORACIONES = re.compile(r"(?<=[.!?;])\s+|\n+")
 
 
-def _extraer_precio_de_texto(texto, unidad=None):
+def _extraer_precio_de_texto(texto, unidad=None, claves_concepto=None):
+    """Precio de la ORACIÓN que menciona la unidad (y, si se pasan
+    claves_concepto, también el concepto). Así un "$9,500" de una frase
+    sobre losas no se asigna a un muro de block."""
     if not texto:
         return None
+    claves_concepto = {c for c in (claves_concepto or set()) if c}
 
     # Se busca primero DENTRO DE CADA ORACION por separado (no una
     # ventana de caracteres a ciegas): una ventana de caracteres fija
@@ -533,6 +569,8 @@ def _extraer_precio_de_texto(texto, unidad=None):
         for oracion in _SEPARADOR_ORACIONES.split(texto):
             oracion_lower = oracion.lower()
             if not any(palabra in oracion_lower for palabra in palabras_clave):
+                continue
+            if claves_concepto and not claves_concepto.intersection(_tokens_relevantes(oracion)):
                 continue
             encontrados = list(_PATRON_PRECIO_PREFIJO.finditer(oracion)) or list(
                 _PATRON_PRECIO_SUFIJO.finditer(oracion)
@@ -558,7 +596,9 @@ def _extraer_precio_de_texto(texto, unidad=None):
     # La unidad cotizada no esta en el mapa de arriba (no hay forma de
     # reconocerla en el texto): se usa el primer precio que aparecio en
     # todo el texto como aproximacion, ya que no hay nada mejor con qué
-    # decidir.
+    # decidir -- salvo que se exija el concepto y no aparezca.
+    if claves_concepto and not claves_concepto.intersection(_tokens_relevantes(texto)):
+        return None
     coincidencias = sorted(
         list(_PATRON_PRECIO_PREFIJO.finditer(texto))
         + list(_PATRON_PRECIO_SUFIJO.finditer(texto)),
@@ -658,7 +698,10 @@ def _buscar_precio_tavily_item(item, api_key=None):
             continue
         # El resumen generado por el buscador puede atribuir el precio de
         # otra página a esta partida. Extraerlo solo del fragmento de la URL.
-        precio = _extraer_precio_de_texto(contenido, item.get("unidad"))
+        claves = _tokens_relevantes(
+            f'{item["descripcion"]} {_consulta_busqueda(item["descripcion"])}'
+        ) - {"barda", "perimetral", "perimetro", "altura", "nueva", "placa", "dentro", "fuera", "tanto"}
+        precio = _extraer_precio_de_texto(contenido, item.get("unidad"), claves)
         if precio is None or precio <= 0:
             continue
         return {
@@ -666,7 +709,13 @@ def _buscar_precio_tavily_item(item, api_key=None):
             "unidad_encontrada": item["unidad"],
             "fuente_nombre": titulo[:120],
             "fuente_url": url,
-            "nota": "Precio encontrado en el fragmento de la fuente; revisar alcance, fecha e impuestos.",
+            "nota": "Precio en la misma frase que el concepto y la unidad; orientativo (alcance, fecha e impuestos sin validar).",
+            "fragmento": next(
+                (o.strip() for o in _SEPARADOR_ORACIONES.split(contenido)
+                 if (f"{precio:,.0f}" in o or f"{precio:.0f}" in o or str(int(precio)) in o.replace(",", ""))),
+                contenido[:200],
+            )[:300],
+            "verificado": False,
             "tiene_dato": True,
             "motor": "Tavily",
         }
