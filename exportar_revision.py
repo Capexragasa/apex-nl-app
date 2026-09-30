@@ -68,7 +68,7 @@ def _clasif(precio, ref):
 
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
-                  revision_cantidades: dict | None = None) -> bytes:
+                  revision_cantidades: dict | None = None, configuracion: str = "") -> bytes:
     if not XLSXWRITER_DISPONIBLE:
         import exportar_revision_respaldo
         return exportar_revision_respaldo.generar_excel(filas, proveedor=proveedor, proyecto=proyecto)
@@ -146,15 +146,15 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # ==================================================================
     ws = wb.add_worksheet("Resumen")
     cab_ini = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado"]
-    cab_fin = ["Semáforo final", "Negociar contra", "P.U. de negociación",
-               "% vs negociación", "Ahorro potencial", "Nota"]
+    cab_fin = ["Semáforo final", "Referencia", "Respaldo", "P.U. de referencia",
+               "% vs referencia", "Diferencia contra referencia", "Ahorro respaldado", "Nota"]
     n_cols = len(cab_ini) + 3 * len(FUENTES) + len(cab_fin)
     ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
     ws.set_row(0, 26)
     ws.write(1, 0, f"Proveedor: {proveedor or '—'} · Proyecto: {proyecto or '—'} · "
-                   f"Generado {hoy:%d/%m/%Y}. Cada fuente se compara por separado (sin promediar). "
-                   "P.U. de color = referencia VALIDADA; gris cursiva = orientativa; tachado = rechazada. "
-                   "Azul = dato capturado.", f_sub)
+                   f"Generado {hoy:%d/%m/%Y}. {configuracion} Cada fuente se compara por separado (sin promediar). "
+                   "P.U. de color = VALIDADA; gris cursiva = orientativa; tachado = rechazada. P.U. y estado "
+                   "vienen de la hoja 'Por fuente': corrígelos ahí y todo se recalcula.", f_sub)
     # Encabezados en dos niveles: fuente arriba, P.U./estado/% abajo.
     for c, texto in enumerate(cab_ini):
         ws.merge_range(3, c, 4, c, texto, f_cab)
@@ -196,11 +196,13 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             estado = ev.get("estado", v.SIN_DATO)
             col_ref = xl_col_to_name(c0)
             col_est = xl_col_to_name(c0 + 1)
-            if ref is not None:
-                ws.write_number(r, c0, ref, estilo_ref(ev))
-            else:
-                ws.write_blank(r, c0, None, f_mon)
-            ws.write(r, c0 + 1, estado, f_estado.get(estado, f_centro))
+            # Vinculado a "Por fuente" (misma partida, misma fuente).
+            origen_ref = f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 4 + j * 4)}"
+            origen_est = f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 5 + j * 4)}"
+            ws.write_formula(r, c0, f'=IF({origen_ref}="","",{origen_ref})',
+                             estilo_ref(ev) if ref is not None else f_mon,
+                             ref if ref is not None else "")
+            ws.write_formula(r, c0 + 1, f"={origen_est}", f_estado.get(estado, f_centro), estado)
             pct = (precio / ref - 1) if (ref and precio is not None
                                         and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
             ws.write_formula(
@@ -212,34 +214,44 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         semaforo = fin.get("semaforo") or v.SIN_VALIDADA
         ws.write(r, c_fin, semaforo, f_semaforo.get(semaforo, f_semaforo["OTRO"]))
         ws.write(r, c_fin + 1, fin.get("referencia_negociacion") or "—", f_txt)
+        respaldo = fin.get("respaldo") or "—"
+        ws.write(r, c_fin + 2, respaldo, f_estado.get(v.VALIDADA if respaldo == "VALIDADA" else v.NO_CONCLUYENTE, f_centro))
         ref_neg = _num(fin.get("precio_negociacion"))
         clave_neg = next((k for k, n in v.NOMBRE_FUENTE.items()
                           if n == fin.get("referencia_negociacion")), None)
         if clave_neg:
             celda_ref = xl_rowcol_to_cell(r, len(cab_ini) + FUENTES.index(clave_neg) * 3)
-            ws.write_formula(r, c_fin + 2, f"={celda_ref}", f_mon_neg, ref_neg or "")
+            ws.write_formula(r, c_fin + 3, f"={celda_ref}", f_mon_neg, ref_neg or "")
         else:
-            ws.write_blank(r, c_fin + 2, None, f_mon_neg)
-        col_neg = xl_col_to_name(c_fin + 2)
+            ws.write_blank(r, c_fin + 3, None, f_mon_neg)
+        col_neg = xl_col_to_name(c_fin + 3)
+        col_resp = xl_col_to_name(c_fin + 2)
         pct_neg = (precio / ref_neg - 1) if (ref_neg and precio is not None) else ""
-        ws.write_formula(r, c_fin + 3, f'=IF({col_neg}{R}="","",E{R}/{col_neg}{R}-1)', f_pct, pct_neg)
-        ahorro = max(0.0, (precio - ref_neg) * (cantidad or 0)) if (ref_neg and precio is not None) else 0.0
+        ws.write_formula(r, c_fin + 4, f'=IF({col_neg}{R}="","",E{R}/{col_neg}{R}-1)', f_pct, pct_neg)
+        dif = round((precio - ref_neg) * (cantidad or 0), 2) if (ref_neg and precio is not None) else ""
+        ws.write_formula(r, c_fin + 5, f'=IF({col_neg}{R}="","",(E{R}-{col_neg}{R})*D{R})', f_mon, dif)
+        # Ahorro solo si la referencia está VALIDADA y el cotizado supera el ±5 %.
+        ahorro = _num(fin.get("ahorro_potencial")) or 0.0
         total_ahorro += ahorro
-        ws.write_formula(r, c_fin + 4, f'=IF({col_neg}{R}="",0,MAX(0,(E{R}-{col_neg}{R})*D{R}))',
-                         f_mon, ahorro)
-        ws.write(r, c_fin + 5, fin.get("detalle") or "", f_txt)
+        ws.write_formula(
+            r, c_fin + 6,
+            f'=IF(AND({col_resp}{R}="VALIDADA",{col_neg}{R}<>""),'
+            f'IF(E{R}>{col_neg}{R}*1.05,(E{R}-{col_neg}{R})*D{R},0),0)',
+            f_mon, ahorro,
+        )
+        ws.write(r, c_fin + 7, fin.get("detalle") or "", f_txt)
 
     ultima = fila0 + len(filas)  # fila (0-based) del total
     U = ultima  # última fila de datos en Excel = ultima (1-based)
     ws.write(ultima, 1, "TOTAL", f_bold)
     ws.write_formula(ultima, 5, f"=SUM(F{fila0 + 1}:F{U})", f_mon_neg, total_importe)
-    col_ah = xl_col_to_name(c_fin + 4)
-    ws.write_formula(ultima, c_fin + 4, f"=SUM({col_ah}{fila0 + 1}:{col_ah}{U})", f_mon_neg, total_ahorro)
-    ws.write(ultima + 1, 1, "Ahorro potencial sobre el importe", f_bold)
-    ws.write_formula(ultima + 1, c_fin + 4, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
+    col_ah = xl_col_to_name(c_fin + 6)
+    ws.write_formula(ultima, c_fin + 6, f"=SUM({col_ah}{fila0 + 1}:{col_ah}{U})", f_mon_neg, total_ahorro)
+    ws.write(ultima + 1, 1, "Ahorro respaldado sobre el importe", f_bold)
+    ws.write_formula(ultima + 1, c_fin + 6, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
                      (total_ahorro / total_importe) if total_importe else "")
 
-    anchos = [5, 44, 8, 10, 13, 15] + [12, 17, 11] * len(FUENTES) + [24, 16, 15, 12, 15, 36]
+    anchos = [5, 44, 8, 10, 13, 15] + [12, 20, 11] * len(FUENTES) + [24, 14, 20, 14, 12, 16, 15, 44]
     for c, ancho in enumerate(anchos):
         ws.set_column(c, c, ancho)
     ws.freeze_panes(5, 2)
@@ -427,9 +439,15 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     reglas = [
         ("RECHAZA (IA)", "La referencia se excluye del precio de negociación, de las diferencias y del semáforo. Queda solo como evidencia."),
         ("NO_SEGURO (IA)", "Se conserva como orientativa (NO CONCLUYENTE): se muestra su precio y su %, pero no decide el semáforo."),
-        ("CONFIRMA (IA)", "Además se verifica unidad, alcance (suministro vs. instalación), antigüedad del dato (máx. "
-                          f"{v.ANTIGUEDAD_MAXIMA_ANIOS} años) y escala del precio (dentro de {v.FACTOR_ESCALA:.0f}× del cotizado)."),
-        ("Coincidencia MEDIA/BAJA", "Sin CONFIRMA de la IA queda POR CONFIRMAR (orientativa)."),
+        ("CONFIRMA (IA)", "No basta. VALIDADA exige además: especificaciones de la referencia (sección, espesor, f'c, "
+                          f"calibre) declaradas por el proveedor y coincidentes, y precio vigente (máx. {v.VIGENCIA_MESES} meses). "
+                          "Si falta algo: EQUIVALENCIA PARCIAL (orientativa)."),
+        ("Filtros (no validan)", f"Escala: una referencia a más de {v.FACTOR_ESCALA:.0f}× del cotizado se descarta como otra unidad. "
+                                 "El ajuste por INPC actualiza la inflación pero no demuestra vigencia."),
+        ("Material / especificación distinta", "Se RECHAZA aunque no haya IA (p. ej. columnas metálicas vs. castillos de concreto)."),
+        ("Sin confirmar", "Sin CONFIRMA de la IA la referencia queda POR CONFIRMAR (orientativa)."),
+        ("Diferencia vs. ahorro", "Contra una referencia VALIDADA la diferencia es ahorro respaldado; contra una orientativa es "
+                                  "'diferencia contra referencia, pendiente de validar'."),
         ("Precio web", "Debe aparecer en la misma frase que el concepto y la unidad. Un fragmento web sin validar es orientativo; "
                        "solo un precio de Gemini con fuente y frase verificadas puede quedar VALIDADO."),
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "

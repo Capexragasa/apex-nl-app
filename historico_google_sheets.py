@@ -242,6 +242,7 @@ class HistoricoGoogleSheets:
             'precio_min': float(grupo['precio_unitario'].min()),
             'precio_mediana': float(grupo['precio_unitario'].median()),
             'precio_max': float(grupo['precio_unitario'].max()),
+            'fecha_dato': str(grupo['fecha_carga'].dropna().astype(str).max() or '') if 'fecha_carga' in grupo else '',
         }
         if precio_cotizado is not None and len(grupo) >= 2:
             # "EN MERCADO" = dentro de +/-5% de la mediana del clúster (ver

@@ -120,6 +120,10 @@ def cargar_historico():
         return None
 
 
+# Edición del Tabulador General de Precios Unitarios de la CDMX cargado en
+# Base_Precios_Unitarios_NL_CDMX.xlsx (hoja "Fuente y Metodología").
+FECHA_TABULADOR_CDMX = "2026-05"
+
 comparador = cargar_comparador()
 historico = cargar_historico()
 
@@ -2068,20 +2072,13 @@ with st.sidebar:
                 "automático si se acaba la cuota de Gemini."
             )
 
-    revisar_todo_con_ia = st.checkbox(
-        "Revisar con IA TODAS las coincidencias, no solo las dudosas",
-        value=False,
-        disabled=not (ia_disponible and usar_ia),
-        help=(
-            "Por default la IA solo revisa las coincidencias de "
-            "confianza BAJA o con diferencia de precio extrema (así "
-            "rinde más la cuota gratuita). Actívalo para que la IA "
-            "confirme TODAS las coincidencias, incluso las de "
-            "confianza ALTA/MEDIA, por si acaso -- usa muchas más "
-            "llamadas a la IA y agota la cuota gratuita más rápido "
-            "en cotizaciones grandes."
-        ),
-    )
+    # Para que una referencia pueda quedar VALIDADA la IA debe confirmar el
+    # concepto, así que ahora se revisan TODAS las coincidencias siempre (ya
+    # no hace falta la casilla "Revisar TODAS"). Los veredictos se guardan
+    # en la sesión para no gastar cuota al repetir la misma cotización.
+    revisar_todo_con_ia = True
+    if usar_ia:
+        st.caption("La IA revisa todas las coincidencias encontradas (necesario para validar).")
 
     if busqueda_ia_disponible:
 
@@ -3036,20 +3033,27 @@ if archivo is not None:
                             "historico", consulta_historico, concepto=concepto, precio=precio,
                             usar_ia=usar_ia,
                             precio_referencia=(consulta_historico or {}).get("precio_mediana"),
+                            fecha_dato=(consulta_historico or {}).get("fecha_dato"),
+                            region="RAGASA",
                         ),
                         "nl": validacion.evaluar_fuente(
                             "nl", nl, concepto=concepto, precio=precio, usar_ia=usar_ia,
                             precio_referencia=nl.get("precio_mediana_ajustada"),
-                            anio_dato=nl.get("anio_dato_mas_reciente"),
+                            fecha_dato=nl.get("anio_dato_mas_reciente"),
+                            region="NL",
                         ),
                         "cdmx": validacion.evaluar_fuente(
                             "cdmx", cdmx, concepto=concepto, precio=precio, usar_ia=usar_ia,
                             precio_referencia=cdmx.get("precio_referencia"),
+                            fecha_dato=FECHA_TABULADOR_CDMX,
+                            region="CDMX",
                         ),
                         "ia": validacion.evaluar_fuente(
                             "ia", _pseudo_ia, concepto=concepto, precio=precio, usar_ia=False,
                             precio_referencia=convertir_numero((busqueda_ia or {}).get("precio_mxn"))
                             if _pseudo_ia and _pseudo_ia.get("match") else None,
+                            fecha_dato=pd.Timestamp.today().strftime("%Y-%m"),
+                            region="WEB",
                             es_web=True,
                             web_verificada=_es_gemini and bool((busqueda_ia or {}).get("verificado")),
                         ),
@@ -3238,7 +3242,7 @@ if archivo is not None:
                 )
 
                 c6.metric(
-                    "💰 Ahorro potencial",
+                    "💰 Ahorro respaldado",
                     f"${_ahorro_potencial_total:,.0f}",
                     help=(
                         "Suma de (precio cotizado - precio sugerido) × "
@@ -3257,6 +3261,16 @@ if archivo is not None:
                 # la cuota") en vez de solo un mensaje genérico -- así se
                 # puede saber la causa real en lugar de adivinar.
                 # ----------------------------------------------------------
+                _pendiente_total = sum(
+                    max(0.0, f["_final"]["diferencia_importe"] or 0)
+                    for f in filas if f["_final"].get("respaldo") == "PENDIENTE DE VALIDAR"
+                )
+                if _pendiente_total:
+                    st.caption(
+                        f"Además hay ${_pendiente_total:,.2f} de diferencia contra referencias "
+                        "pendientes de validar (no es ahorro respaldado hasta confirmar especificación y vigencia)."
+                    )
+
                 # ----------------------------------------------------------
                 # ESTADO DE LA IA, visible (antes quedaba escondido en un
                 # recuadro cerrado): dice en palabras simples si la revisión
@@ -3424,9 +3438,10 @@ if archivo is not None:
                 st.markdown("#### Comparativo por partida")
                 st.caption(
                     "Precio de cada fuente: 🔴 cotizado caro · 🟡 en mercado (±5 %) · 🟢 cotizado "
-                    "barato, solo cuando la Confiabilidad dice VALIDADA. Gris en cursiva = "
-                    "orientativo (POR CONFIRMAR / NO CONCLUYENTE). Tachado = RECHAZADA por la IA. "
-                    "El precio sugerido sale de una sola fuente validada (entre paréntesis)."
+                    "barato, solo cuando la Confiabilidad dice VALIDADA (concepto confirmado por IA, "
+                    "especificaciones declaradas y coincidentes, precio vigente ≤12 meses). Gris en cursiva = "
+                    "orientativo (EQUIVALENCIA PARCIAL / POR CONFIRMAR / NO CONCLUYENTE). Tachado = RECHAZADA. "
+                    "Sin referencia validada, la diferencia se reporta como pendiente de validar, no como ahorro."
                 )
 
                 _FUENTES = (("historico", "Histórico"), ("nl", "Nuevo León"),
@@ -3484,12 +3499,14 @@ if archivo is not None:
                         elif ev["estado"] == validacion.RECHAZADA:
                             estilo_v[col_p] = "color: #98a2b3; text-decoration: line-through"
                             estilo_v[col_e] = "color: #b42318; font-weight: 650"
-                        elif ev["estado"] in (validacion.NO_CONCLUYENTE, validacion.POR_CONFIRMAR):
+                        elif ev["estado"] in validacion.ORIENTATIVAS:
                             estilo_v[col_p] = "background-color: #f1f3f5; color: #60666d; font-style: italic"
                             estilo_v[col_e] = "color: #8a6100"
                         else:
                             estilo_v[col_e] = "color: #98a2b3"
                     _texto_final = _SEMAFORO.get(fin_["semaforo"], fin_["semaforo"])
+                    if fin_["semaforo"] in ("ALTO", "BAJO", "EN MERCADO") and fin_["fuentes_validadas"]:
+                        _texto_final += f" · según {fin_['fuentes_validadas']}"
                     _nombres_clas = {"ALTO": "caro", "BAJO": "barato", "EN MERCADO": "en mercado"}
                     if fin_["semaforo"] == "MIXTO":
                         # Decir qué dice cada fuente en vez de solo "mixto".
@@ -3504,20 +3521,31 @@ if archivo is not None:
                             f"{nombre} {ev['diferencia_pct']:+.0f}%"
                             for clave, nombre in _FUENTES
                             for ev in [evs[clave]]
-                            if ev["estado"] in (validacion.NO_CONCLUYENTE, validacion.POR_CONFIRMAR)
+                            if ev["estado"] in validacion.ORIENTATIVAS
                             and ev["diferencia_pct"] is not None
                         ]
                         if _pistas:
                             _texto_final += " (orientativo: " + ", ".join(_pistas) + ")"
                     fila_v["Semáforo"] = _texto_final
-                    fila_v["Precio sugerido"] = (
-                        f"{_dinero(fin_['precio_negociacion'])} ({fin_['referencia_negociacion']})"
+                    _respaldo = "validada" if fin_["respaldo"] == "VALIDADA" else "pendiente de validar"
+                    fila_v["Precio de referencia"] = (
+                        f"{_dinero(fin_['precio_negociacion'])} ({fin_['referencia_negociacion']} · {_respaldo})"
                         if fin_["precio_negociacion"] else "—"
                     )
                     fila_v["% diferencia"] = (
                         f"{fin_['diferencia_pct']:+.1f}%" if fin_["diferencia_pct"] is not None else "—"
                     )
-                    fila_v["Ahorro potencial"] = _dinero(fin_["ahorro_potencial"])
+                    if fin_["respaldo"] == "VALIDADA":
+                        _etiqueta_dif = {
+                            "ALTO": "ahorro respaldado", "EN MERCADO": "dentro de mercado (±5 %)",
+                            "BAJO": "cotizado por debajo",
+                        }.get(fin_["semaforo"], "fuentes validadas discrepan")
+                    else:
+                        _etiqueta_dif = "pendiente de validar"
+                    fila_v["Diferencia contra referencia"] = (
+                        f"{_dinero(fin_['diferencia_importe'])} · {_etiqueta_dif}"
+                        if fin_["diferencia_importe"] is not None else "—"
+                    )
                     estilo_v["Semáforo"] = {
                         "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 700",
                         "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 700",
@@ -3525,7 +3553,9 @@ if archivo is not None:
                         "MIXTO": "background-color: #fde7d2; color: #7a3e00; font-weight: 700",
                     }.get(fin_["semaforo"], "background-color: #e4e7eb; color: #475467")
                     if fin_["ahorro_potencial"]:
-                        estilo_v["Ahorro potencial"] = "color: #712121; font-weight: 650"
+                        estilo_v["Diferencia contra referencia"] = "color: #712121; font-weight: 650"
+                    elif fin_["diferencia_importe"]:
+                        estilo_v["Diferencia contra referencia"] = "color: #60666d; font-style: italic"
                     registros_vista.append(fila_v)
                     estilos_vista.append(estilo_v)
 
@@ -3600,20 +3630,93 @@ if archivo is not None:
                             })
                     st.dataframe(pd.DataFrame(evidencia), use_container_width=True, hide_index=True)
                     st.caption(
-                        "RECHAZA excluye la referencia de todo cálculo. NO_SEGURO la deja como "
-                        "orientativa. CONFIRMA no basta: además se verifica unidad, alcance, "
-                        "antigüedad del dato y escala del precio. Un precio web solo cuenta si "
-                        "aparece en la misma frase que el concepto y la unidad y su fuente fue "
-                        "verificada."
+                        "RECHAZA (o material/especificación distinta) excluye la referencia. NO_SEGURO la deja "
+                        "como orientativa. CONFIRMA no basta: para VALIDADA el proveedor debe declarar las "
+                        "especificaciones de la referencia (sección, espesor, f'c…) y el precio debe ser vigente "
+                        "(≤12 meses). Si el concepto coincide pero falta algo: EQUIVALENCIA PARCIAL. La escala "
+                        "(5×) solo filtra cifras extremas."
                     )
+
+                # Configuración con la que se generó esta revisión (queda
+                # registrada en el CSV y en el Excel para poder comparar pruebas).
+                configuracion_ia = (
+                    f"Configuración IA: revisión {'SÍ' if usar_ia else 'NO'} · "
+                    f"búsqueda de precios {'SÍ' if (busqueda_ia_disponible and buscar_precios_web) else 'NO'} · "
+                    f"generado {pd.Timestamp.now(tz='America/Monterrey'):%Y-%m-%d %H:%M}."
+                )
+                st.caption(configuracion_ia)
+
+                # CSV comparativo completo: una fila por partida con, por cada
+                # fuente, descripción encontrada, fuente, fecha, confiabilidad,
+                # dictamen y diferencias por unidad e importe.
+                registros_csv = []
+                for _, f in tabla.iterrows():
+                    evs, fin_ = f["_evaluaciones"], f["_final"]
+                    cant = convertir_numero(f.get("Cantidad"))
+                    fila_csv = {
+                        "#": f.get("Partida"),
+                        "Descripción cotizada": f.get("Concepto"),
+                        "Unidad": f.get("Unidad"),
+                        "Cantidad": cant,
+                        "P.U. cotizado": f.get("Precio cotizado"),
+                        "Importe cotizado": round((cant or 0) * f.get("Precio cotizado"), 2),
+                    }
+                    for clave, nombre in _FUENTES:
+                        ev = evs[clave]
+                        if ev["estado"] == validacion.VALIDADA:
+                            dictamen = ev["clasificacion"]
+                        elif ev["estado"] in validacion.ORIENTATIVAS and ev["clasificacion"]:
+                            dictamen = f"orientativo: {ev['clasificacion']}"
+                        elif ev["estado"] == validacion.RECHAZADA:
+                            dictamen = "excluida"
+                        else:
+                            dictamen = ""
+                        fuente_txt = {
+                            "historico": "Histórico interno Ragasa (Google Sheets)",
+                            "nl": "Tabulador homologado de licitaciones NL (SIASI), ajustado INPC",
+                            "cdmx": "Tabulador General de Precios Unitarios CDMX 2026",
+                            "ia": ev.get("descripcion") or "Búsqueda web",
+                        }[clave] if ev["estado"] != validacion.SIN_DATO else ""
+                        fila_csv.update({
+                            f"{nombre} · descripción encontrada": ev.get("descripcion") or "",
+                            f"{nombre} · fuente": fuente_txt,
+                            f"{nombre} · fecha del precio": ev.get("fecha") or "",
+                            f"{nombre} · confiabilidad": ev["estado"],
+                            f"{nombre} · motivo": ev.get("motivo") or "",
+                            f"{nombre} · revisión IA": ev.get("revision_ia") or "",
+                            f"{nombre} · dictamen": dictamen,
+                            f"{nombre} · P.U. referencia": ev["precio_referencia"],
+                            f"{nombre} · diferencia por unidad": ev.get("diferencia_unitaria"),
+                            f"{nombre} · diferencia importe": (
+                                round(ev["diferencia_unitaria"] * cant, 2)
+                                if ev.get("diferencia_unitaria") is not None and cant else None
+                            ),
+                        })
+                    fila_csv.update({
+                        "Semáforo final": fin_["semaforo"],
+                        "Referencia": fin_["referencia_negociacion"] or "",
+                        "Respaldo": fin_["respaldo"] or "",
+                        "% vs referencia": fin_["diferencia_pct"],
+                        "Diferencia contra referencia": fin_["diferencia_importe"],
+                        "Ahorro respaldado": fin_["ahorro_potencial"] or 0.0,
+                        "Nota": fin_["detalle"] or "",
+                        "Configuración": configuracion_ia,
+                    })
+                    registros_csv.append(fila_csv)
 
                 nombre_proveedor = re.sub(r"[^a-zA-Z0-9_-]+", "_", proveedor.strip() if proveedor else "proveedor")
                 nombre_proyecto = re.sub(r"[^a-zA-Z0-9_-]+", "_", proyecto.strip() if proyecto else "proyecto")
                 st.download_button(
+                    "Descargar CSV comparativo completo (4 fuentes con evidencia)",
+                    data=pd.DataFrame(registros_csv).to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"comparativo_{nombre_proveedor}_{nombre_proyecto}.csv",
+                    mime="text/csv",
+                )
+                st.download_button(
                     "Descargar revisión en Excel (Resumen, Cantidades, Por fuente, Evidencia, Metodología)",
                     data=exportar_revision.generar_excel(
                         tabla.to_dict("records"), proveedor=proveedor, proyecto=proyecto,
-                        revision_cantidades=revision_cant,
+                        revision_cantidades=revision_cant, configuracion=configuracion_ia,
                     ),
                     file_name=f"revision_{nombre_proveedor}_{nombre_proyecto}.xlsx",
                     mime=(
