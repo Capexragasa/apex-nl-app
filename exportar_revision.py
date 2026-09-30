@@ -2,15 +2,20 @@
 Excel de la revisión de cotización (descargable desde la app)
 ============================================================
 
+Se genera con XlsxWriter para poder guardar CADA fórmula junto con su
+resultado ya calculado. Con openpyxl las fórmulas quedaban sin valor
+guardado y, al abrir el archivo en la vista previa de la Mac, en el correo
+o en Drive, las columnas de % y semáforo aparecían vacías. Ahora se ven en
+cualquier visor y en Excel siguen siendo fórmulas vivas.
+
 Hojas:
-  1. Resumen      una fila por partida: importe, semáforo final, referencia
-                  usada para negociar y ahorro, todo con fórmulas.
-  2. Por fuente   las 4 comparaciones independientes (Histórico Ragasa, NL,
-                  CDMX, IA): precio de referencia, estado, % y semáforo
-                  calculados con fórmulas a partir del precio de referencia.
-  3. Evidencia    qué encontró cada fuente, por qué quedó en ese estado,
-                  veredicto de la IA y fragmento/URL de la fuente web.
-  4. Metodología  reglas de validación y datos de la revisión.
+  1. Resumen      una fila por partida con las 4 fuentes lado a lado
+                  (P.U., estado y %), semáforo final, referencia para
+                  negociar y ahorro.
+  2. Por fuente   las 4 comparaciones con % y semáforo calculados por
+                  fórmula a partir del precio de referencia.
+  3. Evidencia    qué encontró cada fuente y por qué quedó en ese estado.
+  4. Metodología  reglas de validación.
 """
 
 from __future__ import annotations
@@ -18,243 +23,331 @@ from __future__ import annotations
 import datetime as _dt
 import io
 
-from openpyxl import Workbook
-from openpyxl.formatting.rule import CellIsRule
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+import xlsxwriter
+from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
 
 import validacion_referencias as v
 
 FUENTES = ("historico", "nl", "cdmx", "ia")
+NOMBRE_CORTO = {"historico": "Histórico", "nl": "Nuevo León", "cdmx": "CDMX", "ia": "IA internet"}
 
-AZUL = "1F3864"
-AZUL2 = "2E5496"
-GRIS = "F2F2F2"
-ROJO_F, ROJO_T = "F8C9C9", "712121"
-VERDE_F, VERDE_T = "CCEBD2", "14532D"
-AMBAR_F, AMBAR_T = "FFF0BB", "705000"
-GRIS_F, GRIS_T = "E4E7EB", "475467"
-INPUT_T = "0000FF"
-
-_fino = Side(style="thin", color="BFBFBF")
-BORDE = Border(left=_fino, right=_fino, top=_fino, bottom=_fino)
-MONEDA = '$#,##0.00;($#,##0.00);"—"'
-PCT = '+0.0%;-0.0%;0.0%'
+AZUL, AZUL2 = "#1F3864", "#2E5496"
+ROJO_F, ROJO_T = "#F8C9C9", "#712121"
+VERDE_F, VERDE_T = "#CCEBD2", "#14532D"
+AMBAR_F, AMBAR_T = "#FFF0BB", "#705000"
+NARANJA_F, NARANJA_T = "#FDE7D2", "#7A3E00"
+GRIS_F, GRIS_T = "#E4E7EB", "#475467"
+ESTADO_COLOR = {
+    v.VALIDADA: VERDE_T, v.RECHAZADA: "#B42318",
+    v.NO_CONCLUYENTE: "#8A6100", v.POR_CONFIRMAR: "#667085", v.SIN_DATO: "#98A2B3",
+}
 
 
-def _encabezado(ws, fila, textos, relleno=AZUL2):
-    for col, texto in enumerate(textos, start=1):
-        c = ws.cell(row=fila, column=col, value=texto)
-        c.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-        c.fill = PatternFill("solid", fgColor=relleno)
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = BORDE
+def _num(valor):
+    try:
+        if valor is None or valor == "":
+            return None
+        n = float(valor)
+        return None if n != n else n  # NaN
+    except (TypeError, ValueError):
+        return None
 
 
-def _titulo(ws, texto, subtitulo, ancho):
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ancho)
-    c = ws.cell(row=1, column=1, value=texto)
-    c.font = Font(name="Arial", bold=True, size=14, color="FFFFFF")
-    c.fill = PatternFill("solid", fgColor=AZUL)
-    c.alignment = Alignment(vertical="center")
-    ws.row_dimensions[1].height = 26
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ancho)
-    c = ws.cell(row=2, column=1, value=subtitulo)
-    c.font = Font(name="Arial", size=9, color="595959")
-
-
-def _celda(ws, fila, col, valor, fmt=None, azul=False, negrita=False, wrap=False, centro=False):
-    c = ws.cell(row=fila, column=col, value=valor)
-    c.font = Font(name="Arial", size=10, bold=negrita, color=INPUT_T if azul else "000000")
-    c.border = BORDE
-    c.alignment = Alignment(vertical="top", wrap_text=wrap,
-                            horizontal="center" if centro else None)
-    if fmt:
-        c.number_format = fmt
-    return c
-
-
-def _semaforo_cf(ws, rango):
-    for texto, fondo, letra in (
-        ("ALTO", ROJO_F, ROJO_T),
-        ("BAJO", VERDE_F, VERDE_T),
-        ("EN MERCADO", AMBAR_F, AMBAR_T),
-        ("MIXTO", GRIS_F, GRIS_T),
-        ("NO CONCLUYENTE", GRIS_F, GRIS_T),
-        ("SIN DATOS SUFICIENTES", GRIS_F, GRIS_T),
-    ):
-        ws.conditional_formatting.add(
-            rango,
-            CellIsRule(operator="equal", formula=[f'"{texto}"'],
-                       fill=PatternFill("solid", fgColor=fondo),
-                       font=Font(color=letra, bold=True)),
-        )
+def _clasif(precio, ref):
+    if precio is None or not ref:
+        return ""
+    if precio > ref * 1.05:
+        return "ALTO"
+    if precio < ref * 0.95:
+        return "BAJO"
+    return "EN MERCADO"
 
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") -> bytes:
-    """filas: los dicts de la app (con '_evaluaciones' y '_final')."""
-    wb = Workbook()
+    buffer = io.BytesIO()
+    wb = xlsxwriter.Workbook(buffer, {"in_memory": True, "nan_inf_to_errors": True})
 
-    # ------------------------------------------------------------------
-    # Hoja 2 primero (Resumen la referencia): Por fuente
-    # ------------------------------------------------------------------
-    ws_f = wb.active
-    ws_f.title = "Por fuente"
+    base = {"font_name": "Arial", "font_size": 10, "border": 1, "border_color": "#BFBFBF",
+            "valign": "top"}
+
+    def fmt(**extra):
+        d = dict(base)
+        d.update(extra)
+        return wb.add_format(d)
+
+    f_titulo = wb.add_format({"font_name": "Arial", "bold": True, "font_size": 14,
+                              "font_color": "#FFFFFF", "bg_color": AZUL, "valign": "vcenter"})
+    f_sub = wb.add_format({"font_name": "Arial", "font_size": 9, "font_color": "#595959"})
+    f_cab = fmt(bold=True, font_color="#FFFFFF", bg_color=AZUL2, align="center",
+                valign="vcenter", text_wrap=True)
+    f_cab_fuente = {k: fmt(bold=True, font_color="#FFFFFF", bg_color=c, align="center",
+                           valign="vcenter", text_wrap=True)
+                    for k, c in zip(FUENTES, ("#4B5D7A", "#2E5496", "#3F6E8C", "#5A4E8C"))}
+    f_txt = fmt(text_wrap=True)
+    f_centro = fmt(align="center")
+    f_input_num = fmt(num_format="#,##0.00", font_color="#0000FF")
+    f_input_mon = fmt(num_format="$#,##0.00", font_color="#0000FF")
+    f_mon = fmt(num_format='$#,##0.00;($#,##0.00);"—"')
+    f_mon_neg = fmt(num_format='$#,##0.00;($#,##0.00);"—"', bold=True)
+    f_pct = fmt(num_format='+0.0%;-0.0%;0.0%')
+    f_pct_b = fmt(num_format="0.0%", bold=True)
+    f_bold = fmt(bold=True)
+    f_estado = {e: fmt(align="center", bold=True, font_color=c) for e, c in ESTADO_COLOR.items()}
+    # P.U. de referencia: pintado como en la app según estado y semáforo.
+    f_ref = {
+        "ALTO": fmt(num_format="$#,##0.00", bg_color=ROJO_F, font_color=ROJO_T, bold=True),
+        "BAJO": fmt(num_format="$#,##0.00", bg_color=VERDE_F, font_color=VERDE_T, bold=True),
+        "EN MERCADO": fmt(num_format="$#,##0.00", bg_color=AMBAR_F, font_color=AMBAR_T, bold=True),
+        "ORIENTATIVA": fmt(num_format="$#,##0.00", bg_color="#F1F3F5", font_color="#60666D", italic=True),
+        "RECHAZADA": fmt(num_format="$#,##0.00", font_color="#98A2B3", font_strikeout=True),
+        "": f_mon,
+    }
+    f_semaforo = {
+        "ALTO": fmt(align="center", bold=True, bg_color=ROJO_F, font_color=ROJO_T),
+        "BAJO": fmt(align="center", bold=True, bg_color=VERDE_F, font_color=VERDE_T),
+        "EN MERCADO": fmt(align="center", bold=True, bg_color=AMBAR_F, font_color=AMBAR_T),
+        "MIXTO": fmt(align="center", bold=True, bg_color=NARANJA_F, font_color=NARANJA_T),
+        "OTRO": fmt(align="center", bold=True, bg_color=GRIS_F, font_color=GRIS_T),
+    }
+
+    def estilo_ref(ev):
+        estado = ev.get("estado")
+        if estado == v.VALIDADA:
+            return f_ref.get(ev.get("clasificacion") or "", f_mon)
+        if estado in (v.NO_CONCLUYENTE, v.POR_CONFIRMAR):
+            return f_ref["ORIENTATIVA"]
+        if estado == v.RECHAZADA:
+            return f_ref["RECHAZADA"]
+        return f_mon
+
+    def semaforo_cf(ws, rango):
+        for texto, clave in (("ALTO", "ALTO"), ("BAJO", "BAJO"), ("EN MERCADO", "EN MERCADO")):
+            ws.conditional_format(rango, {
+                "type": "cell", "criteria": "==", "value": f'"{texto}"',
+                "format": wb.add_format({"bg_color": {"ALTO": ROJO_F, "BAJO": VERDE_F,
+                                                      "EN MERCADO": AMBAR_F}[clave],
+                                         "font_color": {"ALTO": ROJO_T, "BAJO": VERDE_T,
+                                                        "EN MERCADO": AMBAR_T}[clave],
+                                         "bold": True}),
+            })
+
+    hoy = _dt.date.today()
+
+    # ==================================================================
+    # Hoja 1: Resumen
+    # ==================================================================
+    ws = wb.add_worksheet("Resumen")
+    cab_ini = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado"]
+    cab_fin = ["Semáforo final", "Negociar contra", "P.U. de negociación",
+               "% vs negociación", "Ahorro potencial", "Nota"]
+    n_cols = len(cab_ini) + 3 * len(FUENTES) + len(cab_fin)
+    ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
+    ws.set_row(0, 26)
+    ws.write(1, 0, f"Proveedor: {proveedor or '—'} · Proyecto: {proyecto or '—'} · "
+                   f"Generado {hoy:%d/%m/%Y}. Cada fuente se compara por separado (sin promediar). "
+                   "P.U. de color = referencia VALIDADA; gris cursiva = orientativa; tachado = rechazada. "
+                   "Azul = dato capturado.", f_sub)
+    # Encabezados en dos niveles: fuente arriba, P.U./estado/% abajo.
+    for c, texto in enumerate(cab_ini):
+        ws.merge_range(3, c, 4, c, texto, f_cab)
+    for j, clave in enumerate(FUENTES):
+        c0 = len(cab_ini) + j * 3
+        ws.merge_range(3, c0, 3, c0 + 2, NOMBRE_CORTO[clave], f_cab_fuente[clave])
+        ws.write(4, c0, "P.U. ref.", f_cab_fuente[clave])
+        ws.write(4, c0 + 1, "Estado", f_cab_fuente[clave])
+        ws.write(4, c0 + 2, "% vs cotizado", f_cab_fuente[clave])
+    c_fin = len(cab_ini) + 3 * len(FUENTES)
+    for k, texto in enumerate(cab_fin):
+        ws.merge_range(3, c_fin + k, 4, c_fin + k, texto, f_cab)
+    ws.set_row(4, 28)
+
+    fila0 = 5
+    total_importe = 0.0
+    total_ahorro = 0.0
+    for i, f in enumerate(filas):
+        r = fila0 + i
+        R = r + 1  # número de fila de Excel
+        evs = f.get("_evaluaciones") or {}
+        fin = f.get("_final") or {}
+        cantidad = _num(f.get("Cantidad"))
+        precio = _num(f.get("Precio cotizado"))
+        importe = (cantidad or 0) * (precio or 0)
+        total_importe += importe
+
+        ws.write(r, 0, f.get("Partida"), f_centro)
+        ws.write(r, 1, f.get("Concepto"), f_txt)
+        ws.write(r, 2, f.get("Unidad"), f_centro)
+        ws.write_number(r, 3, cantidad or 0, f_input_num)
+        ws.write_number(r, 4, precio or 0, f_input_mon)
+        ws.write_formula(r, 5, f"=D{R}*E{R}", f_mon, importe)
+
+        for j, clave in enumerate(FUENTES):
+            c0 = len(cab_ini) + j * 3
+            ev = evs.get(clave) or {}
+            ref = _num(ev.get("precio_referencia"))
+            estado = ev.get("estado", v.SIN_DATO)
+            col_ref = xl_col_to_name(c0)
+            col_est = xl_col_to_name(c0 + 1)
+            if ref is not None:
+                ws.write_number(r, c0, ref, estilo_ref(ev))
+            else:
+                ws.write_blank(r, c0, None, f_mon)
+            ws.write(r, c0 + 1, estado, f_estado.get(estado, f_centro))
+            pct = (precio / ref - 1) if (ref and precio is not None
+                                        and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
+            ws.write_formula(
+                r, c0 + 2,
+                f'=IF(OR({col_ref}{R}="",{col_est}{R}="RECHAZADA",{col_est}{R}="SIN DATO"),"",E{R}/{col_ref}{R}-1)',
+                f_pct, pct,
+            )
+
+        semaforo = fin.get("semaforo") or v.SIN_VALIDADA
+        ws.write(r, c_fin, semaforo, f_semaforo.get(semaforo, f_semaforo["OTRO"]))
+        ws.write(r, c_fin + 1, fin.get("referencia_negociacion") or "—", f_txt)
+        ref_neg = _num(fin.get("precio_negociacion"))
+        clave_neg = next((k for k, n in v.NOMBRE_FUENTE.items()
+                          if n == fin.get("referencia_negociacion")), None)
+        if clave_neg:
+            celda_ref = xl_rowcol_to_cell(r, len(cab_ini) + FUENTES.index(clave_neg) * 3)
+            ws.write_formula(r, c_fin + 2, f"={celda_ref}", f_mon_neg, ref_neg or "")
+        else:
+            ws.write_blank(r, c_fin + 2, None, f_mon_neg)
+        col_neg = xl_col_to_name(c_fin + 2)
+        pct_neg = (precio / ref_neg - 1) if (ref_neg and precio is not None) else ""
+        ws.write_formula(r, c_fin + 3, f'=IF({col_neg}{R}="","",E{R}/{col_neg}{R}-1)', f_pct, pct_neg)
+        ahorro = max(0.0, (precio - ref_neg) * (cantidad or 0)) if (ref_neg and precio is not None) else 0.0
+        total_ahorro += ahorro
+        ws.write_formula(r, c_fin + 4, f'=IF({col_neg}{R}="",0,MAX(0,(E{R}-{col_neg}{R})*D{R}))',
+                         f_mon, ahorro)
+        ws.write(r, c_fin + 5, fin.get("detalle") or "", f_txt)
+
+    ultima = fila0 + len(filas)  # fila (0-based) del total
+    U = ultima  # última fila de datos en Excel = ultima (1-based)
+    ws.write(ultima, 1, "TOTAL", f_bold)
+    ws.write_formula(ultima, 5, f"=SUM(F{fila0 + 1}:F{U})", f_mon_neg, total_importe)
+    col_ah = xl_col_to_name(c_fin + 4)
+    ws.write_formula(ultima, c_fin + 4, f"=SUM({col_ah}{fila0 + 1}:{col_ah}{U})", f_mon_neg, total_ahorro)
+    ws.write(ultima + 1, 1, "Ahorro potencial sobre el importe", f_bold)
+    ws.write_formula(ultima + 1, c_fin + 4, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
+                     (total_ahorro / total_importe) if total_importe else "")
+
+    anchos = [5, 44, 8, 10, 13, 15] + [12, 17, 11] * len(FUENTES) + [24, 16, 15, 12, 15, 36]
+    for c, ancho in enumerate(anchos):
+        ws.set_column(c, c, ancho)
+    ws.freeze_panes(5, 2)
+    ws.hide_gridlines(2)
+    ws.set_landscape()
+    ws.fit_to_pages(1, 0)
+
+    # ==================================================================
+    # Hoja 2: Por fuente (semáforo por fuente calculado con fórmula)
+    # ==================================================================
+    wf = wb.add_worksheet("Por fuente")
     cab_f = ["#", "Concepto", "Unidad", "P.U. cotizado"]
     for clave in FUENTES:
-        nombre = v.NOMBRE_FUENTE[clave]
-        cab_f += [f"{nombre}\nprecio ref.", f"{nombre}\nestado",
-                  f"{nombre}\n% vs cotizado", f"{nombre}\nsemáforo"]
-    _titulo(ws_f, "Comparación independiente por fuente",
-            "Cada fuente se compara por separado (sin promediar). Solo las referencias VALIDADAS "
-            "tienen semáforo. Semáforo: ±5 % = EN MERCADO.", len(cab_f))
-    _encabezado(ws_f, 4, cab_f)
-    ws_f.row_dimensions[4].height = 42
-    fila_f = {}
+        n = NOMBRE_CORTO[clave]
+        cab_f += [f"{n}\nP.U. ref.", f"{n}\nestado", f"{n}\n% vs cotizado", f"{n}\nsemáforo"]
+    wf.merge_range(0, 0, 0, len(cab_f) - 1, "Comparación independiente por fuente", f_titulo)
+    wf.set_row(0, 26)
+    wf.write(1, 0, "Semáforo por fuente solo para referencias VALIDADAS: ±5 % = EN MERCADO. "
+                   "El P.U. de referencia se puede corregir aquí y las fórmulas se recalculan.", f_sub)
+    for c, texto in enumerate(cab_f):
+        wf.write(3, c, texto, f_cab_fuente.get(FUENTES[(c - 4) // 4], f_cab) if c >= 4 else f_cab)
+    wf.set_row(3, 42)
     for i, f in enumerate(filas):
-        r = 5 + i
-        fila_f[i] = r
-        _celda(ws_f, r, 1, f.get("Partida"), centro=True)
-        _celda(ws_f, r, 2, f.get("Concepto"), wrap=True)
-        _celda(ws_f, r, 3, f.get("Unidad"), centro=True)
-        _celda(ws_f, r, 4, f.get("Precio cotizado"), MONEDA, azul=True)
+        r = 4 + i
+        R = r + 1
+        precio = _num(f.get("Precio cotizado"))
+        wf.write(r, 0, f.get("Partida"), f_centro)
+        wf.write(r, 1, f.get("Concepto"), f_txt)
+        wf.write(r, 2, f.get("Unidad"), f_centro)
+        wf.write_number(r, 3, precio or 0, f_input_mon)
         evs = f.get("_evaluaciones") or {}
         for j, clave in enumerate(FUENTES):
-            base = 5 + j * 4
+            c0 = 4 + j * 4
             ev = evs.get(clave) or {}
-            ref_col = get_column_letter(base)
-            est_col = get_column_letter(base + 1)
-            precio_ref = ev.get("precio_referencia")
-            _celda(ws_f, r, base, precio_ref, MONEDA, azul=True)
-            _celda(ws_f, r, base + 1, ev.get("estado", v.SIN_DATO), centro=True)
-            # Las rechazadas y las sin dato no tienen % ni semáforo.
-            _celda(ws_f, r, base + 2,
-                   f'=IF(OR({ref_col}{r}="",{est_col}{r}="RECHAZADA",{est_col}{r}="SIN DATO"),"",D{r}/{ref_col}{r}-1)',
-                   PCT)
-            _celda(ws_f, r, base + 3,
-                   f'=IF({est_col}{r}<>"VALIDADA","",IF(D{r}>{ref_col}{r}*1.05,"ALTO",'
-                   f'IF(D{r}<{ref_col}{r}*0.95,"BAJO","EN MERCADO")))',
-                   centro=True)
-            _semaforo_cf(ws_f, f"{get_column_letter(base + 3)}{r}")
-    ultima_f = 4 + len(filas)
-    for j in range(len(FUENTES)):
-        col_est = get_column_letter(6 + j * 4)
-        rng = f"{col_est}5:{col_est}{max(ultima_f, 5)}"
-        for texto, color in (("VALIDADA", VERDE_T), ("RECHAZADA", ROJO_T),
-                             ("NO CONCLUYENTE", AMBAR_T), ("POR CONFIRMAR", GRIS_T)):
-            ws_f.conditional_formatting.add(
-                rng, CellIsRule(operator="equal", formula=[f'"{texto}"'],
-                                font=Font(color=color, bold=True)))
-    anchos_f = {1: 5, 2: 44, 3: 8, 4: 13}
-    for j in range(len(FUENTES)):
-        anchos_f.update({5 + j * 4: 13, 6 + j * 4: 15, 7 + j * 4: 11, 8 + j * 4: 12})
-    for col, ancho in anchos_f.items():
-        ws_f.column_dimensions[get_column_letter(col)].width = ancho
-    ws_f.freeze_panes = "E5"
-    ws_f.sheet_view.showGridLines = False
+            ref = _num(ev.get("precio_referencia"))
+            estado = ev.get("estado", v.SIN_DATO)
+            cr, ce = xl_col_to_name(c0), xl_col_to_name(c0 + 1)
+            if ref is not None:
+                wf.write_number(r, c0, ref, f_input_mon)
+            else:
+                wf.write_blank(r, c0, None, f_input_mon)
+            wf.write(r, c0 + 1, estado, f_estado.get(estado, f_centro))
+            pct = (precio / ref - 1) if (ref and precio is not None
+                                        and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
+            wf.write_formula(r, c0 + 2,
+                             f'=IF(OR({cr}{R}="",{ce}{R}="RECHAZADA",{ce}{R}="SIN DATO"),"",D{R}/{cr}{R}-1)',
+                             f_pct, pct)
+            sem = _clasif(precio, ref) if estado == v.VALIDADA else ""
+            wf.write_formula(r, c0 + 3,
+                             f'=IF({ce}{R}<>"VALIDADA","",IF(D{R}>{cr}{R}*1.05,"ALTO",'
+                             f'IF(D{R}<{cr}{R}*0.95,"BAJO","EN MERCADO")))',
+                             f_centro, sem)
+            semaforo_cf(wf, f"{xl_col_to_name(c0 + 3)}{R}")
+    anchos_f = [5, 44, 8, 13] + [12, 15, 11, 12] * len(FUENTES)
+    for c, ancho in enumerate(anchos_f):
+        wf.set_column(c, c, ancho)
+    wf.freeze_panes(4, 4)
+    wf.hide_gridlines(2)
+    wf.set_landscape()
+    wf.fit_to_pages(1, 0)
 
-    # ------------------------------------------------------------------
-    # Hoja 1: Resumen
-    # ------------------------------------------------------------------
-    ws = wb.create_sheet("Resumen", 0)
-    cab = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado",
-           "Semáforo final", "Fuentes validadas", "Referencia para negociar",
-           "P.U. de negociación", "% vs negociación", "Ahorro potencial", "Nota"]
-    _titulo(ws, "Revisión de cotización CAPEX",
-            f"Proveedor: {proveedor or '—'} · Proyecto: {proyecto or '—'} · "
-            f"Generado {_dt.date.today():%d/%m/%Y}. Azul = dato capturado; negro = fórmula.",
-            len(cab))
-    _encabezado(ws, 4, cab)
-    ws.row_dimensions[4].height = 32
-    for i, f in enumerate(filas):
-        r = 5 + i
-        fin = f.get("_final") or {}
-        _celda(ws, r, 1, f.get("Partida"), centro=True)
-        _celda(ws, r, 2, f.get("Concepto"), wrap=True)
-        _celda(ws, r, 3, f.get("Unidad"), centro=True)
-        _celda(ws, r, 4, f.get("Cantidad"), "#,##0.00", azul=True)
-        _celda(ws, r, 5, f.get("Precio cotizado"), MONEDA, azul=True)
-        _celda(ws, r, 6, f"=D{r}*E{r}", MONEDA)
-        _celda(ws, r, 7, fin.get("semaforo") or v.SIN_VALIDADA, centro=True, negrita=True)
-        _celda(ws, r, 8, fin.get("fuentes_validadas") or "—", wrap=True)
-        _celda(ws, r, 9, fin.get("referencia_negociacion") or "—")
-        # El P.U. de negociación se enlaza a la hoja "Por fuente" (misma
-        # referencia que la app eligió), para que cambie si se corrige ahí.
-        ref = fin.get("referencia_negociacion")
-        clave_ref = next((k for k, n in v.NOMBRE_FUENTE.items() if n == ref), None)
-        if clave_ref:
-            col_ref = get_column_letter(5 + FUENTES.index(clave_ref) * 4)
-            _celda(ws, r, 10, f"='Por fuente'!{col_ref}{fila_f[i]}", MONEDA)
-        else:
-            _celda(ws, r, 10, None, MONEDA)
-        _celda(ws, r, 11, f'=IF(J{r}="","",E{r}/J{r}-1)', PCT)
-        _celda(ws, r, 12, f'=IF(J{r}="",0,MAX(0,(E{r}-J{r})*D{r}))', MONEDA)
-        _celda(ws, r, 13, fin.get("detalle") or "", wrap=True)
-    ultima = 4 + len(filas)
-    rt = ultima + 1
-    _celda(ws, rt, 2, "TOTAL", negrita=True)
-    _celda(ws, rt, 6, f"=SUM(F5:F{ultima})", MONEDA, negrita=True)
-    _celda(ws, rt, 12, f"=SUM(L5:L{ultima})", MONEDA, negrita=True)
-    _celda(ws, rt + 1, 2, "Ahorro potencial sobre el importe", negrita=True)
-    _celda(ws, rt + 1, 12, f'=IF(F{rt}=0,"",L{rt}/F{rt})', "0.0%", negrita=True)
-    _semaforo_cf(ws, f"G5:G{max(ultima, 5)}")
-    for col, ancho in {1: 5, 2: 46, 3: 8, 4: 10, 5: 13, 6: 15, 7: 23, 8: 22,
-                       9: 19, 10: 15, 11: 12, 12: 15, 13: 40}.items():
-        ws.column_dimensions[get_column_letter(col)].width = ancho
-    ws.freeze_panes = "C5"
-    ws.sheet_view.showGridLines = False
-
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Hoja 3: Evidencia
-    # ------------------------------------------------------------------
-    ws_e = wb.create_sheet("Evidencia")
+    # ==================================================================
+    we = wb.add_worksheet("Evidencia")
     cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "Estado", "Motivo / verificaciones",
              "Concepto encontrado en la fuente", "Confianza texto", "P.U. referencia",
              "Revisión IA", "Evidencia web (frase o URL)"]
-    _titulo(ws_e, "Evidencia de cada referencia",
-            "Por qué cada referencia quedó VALIDADA, NO CONCLUYENTE, POR CONFIRMAR, RECHAZADA o SIN DATO.",
-            len(cab_e))
-    _encabezado(ws_e, 4, cab_e)
-    r = 5
+    we.merge_range(0, 0, 0, len(cab_e) - 1, "Evidencia de cada referencia", f_titulo)
+    we.set_row(0, 26)
+    we.write(1, 0, "Por qué cada referencia quedó VALIDADA, NO CONCLUYENTE, POR CONFIRMAR, "
+                   "RECHAZADA o SIN DATO.", f_sub)
+    for c, texto in enumerate(cab_e):
+        we.write(3, c, texto, f_cab)
+    r = 4
     for f in filas:
         for clave in FUENTES:
             ev = (f.get("_evaluaciones") or {}).get(clave) or {}
-            _celda(ws_e, r, 1, f.get("Partida"), centro=True)
-            _celda(ws_e, r, 2, f.get("Concepto"), wrap=True)
-            _celda(ws_e, r, 3, f.get("Unidad"), centro=True)
-            _celda(ws_e, r, 4, v.NOMBRE_FUENTE[clave])
-            _celda(ws_e, r, 5, ev.get("estado", v.SIN_DATO), centro=True, negrita=True)
-            _celda(ws_e, r, 6, ev.get("motivo"), wrap=True)
-            _celda(ws_e, r, 7, ev.get("descripcion"), wrap=True)
-            _celda(ws_e, r, 8, ev.get("confianza"), centro=True)
-            _celda(ws_e, r, 9, ev.get("precio_referencia"), MONEDA)
-            _celda(ws_e, r, 10, ev.get("revision_ia"), wrap=True)
-            _celda(ws_e, r, 11, ev.get("evidencia"), wrap=True)
+            estado = ev.get("estado", v.SIN_DATO)
+            we.write(r, 0, f.get("Partida"), f_centro)
+            we.write(r, 1, f.get("Concepto"), f_txt)
+            we.write(r, 2, f.get("Unidad"), f_centro)
+            we.write(r, 3, v.NOMBRE_FUENTE[clave], f_txt)
+            we.write(r, 4, estado, f_estado.get(estado, f_centro))
+            we.write(r, 5, ev.get("motivo") or "", f_txt)
+            we.write(r, 6, ev.get("descripcion") or "", f_txt)
+            we.write(r, 7, ev.get("confianza") or "", f_centro)
+            ref = _num(ev.get("precio_referencia"))
+            if ref is not None:
+                we.write_number(r, 8, ref, f_mon)
+            else:
+                we.write_blank(r, 8, None, f_mon)
+            we.write(r, 9, ev.get("revision_ia") or "", f_txt)
+            we.write(r, 10, ev.get("evidencia") or "", f_txt)
             r += 1
-    rng_e = f"E5:E{max(r - 1, 5)}"
-    for texto, color in (("VALIDADA", VERDE_T), ("RECHAZADA", ROJO_T),
-                         ("NO CONCLUYENTE", AMBAR_T), ("POR CONFIRMAR", GRIS_T)):
-        ws_e.conditional_formatting.add(
-            rng_e, CellIsRule(operator="equal", formula=[f'"{texto}"'], font=Font(color=color, bold=True)))
-    for col, ancho in {1: 5, 2: 38, 3: 8, 4: 16, 5: 16, 6: 44, 7: 50, 8: 11, 9: 14,
-                       10: 44, 11: 50}.items():
-        ws_e.column_dimensions[get_column_letter(col)].width = ancho
-    ws_e.freeze_panes = "E5"
-    ws_e.sheet_view.showGridLines = False
+    for c, ancho in enumerate([5, 38, 8, 16, 16, 44, 50, 11, 14, 44, 50]):
+        we.set_column(c, c, ancho)
+    we.freeze_panes(4, 4)
+    we.hide_gridlines(2)
+    we.set_landscape()
+    we.fit_to_pages(1, 0)
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Hoja 4: Metodología
-    # ------------------------------------------------------------------
-    ws_m = wb.create_sheet("Metodología")
-    ws_m.column_dimensions["A"].width = 26
-    ws_m.column_dimensions["B"].width = 100
-    _titulo(ws_m, "Metodología de validación", "Cómo se decide qué referencias cuentan.", 2)
+    # ==================================================================
+    wm = wb.add_worksheet("Metodología")
+    wm.set_column(0, 0, 26)
+    wm.set_column(1, 1, 100)
+    wm.merge_range(0, 0, 0, 1, "Metodología de validación", f_titulo)
+    wm.set_row(0, 26)
     reglas = [
         ("RECHAZA (IA)", "La referencia se excluye del precio de negociación, de las diferencias y del semáforo. Queda solo como evidencia."),
         ("NO_SEGURO (IA)", "Se conserva como orientativa (NO CONCLUYENTE): se muestra su precio y su %, pero no decide el semáforo."),
-        ("CONFIRMA (IA)", "Además se verifica unidad (misma unidad), alcance (suministro vs. instalación), antigüedad del dato (máx. "
+        ("CONFIRMA (IA)", "Además se verifica unidad, alcance (suministro vs. instalación), antigüedad del dato (máx. "
                           f"{v.ANTIGUEDAD_MAXIMA_ANIOS} años) y escala del precio (dentro de {v.FACTOR_ESCALA:.0f}× del cotizado)."),
-        ("Coincidencia débil", "Si la coincidencia de texto es BAJA y la IA no la confirmó: POR CONFIRMAR (orientativa)."),
+        ("Coincidencia MEDIA/BAJA", "Sin CONFIRMA de la IA queda POR CONFIRMAR (orientativa)."),
         ("Precio web", "Debe aparecer en la misma frase que el concepto y la unidad. Un fragmento web sin validar es orientativo; "
                        "solo un precio de Gemini con fuente y frase verificadas puede quedar VALIDADO."),
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
@@ -265,19 +358,13 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") ->
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),
         ("Histórico Ragasa", "Cotizaciones guardadas previamente en el histórico interno (Google Sheets)."),
     ]
-    _encabezado(ws_m, 4, ["Regla", "Aplicación"])
+    wm.write(3, 0, "Regla", f_cab)
+    wm.write(3, 1, "Aplicación", f_cab)
     for i, (regla, texto) in enumerate(reglas):
-        _celda(ws_m, 5 + i, 1, regla, negrita=True)
-        _celda(ws_m, 5 + i, 2, texto, wrap=True)
-        ws_m.row_dimensions[5 + i].height = 32
-    ws_m.sheet_view.showGridLines = False
+        wm.write(4 + i, 0, regla, f_bold)
+        wm.write(4 + i, 1, texto, f_txt)
+        wm.set_row(4 + i, 30)
+    wm.hide_gridlines(2)
 
-    for hoja in wb.worksheets:
-        hoja.page_setup.orientation = "landscape"
-        hoja.page_setup.fitToWidth = 1
-        hoja.page_setup.fitToHeight = 0
-        hoja.sheet_properties.pageSetUpPr.fitToPage = True
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
+    wb.close()
     return buffer.getvalue()
