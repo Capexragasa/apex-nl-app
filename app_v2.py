@@ -49,6 +49,7 @@ import ajuste_inflacion
 import revision_ia
 import validacion_referencias as validacion
 import revision_cantidades
+import mercado
 import exportar_revision
 import busqueda_mercado_ia
 
@@ -3607,10 +3608,63 @@ if archivo is not None:
                             } for e in h["escenarios"]]),
                             use_container_width=True, hide_index=True,
                         )
+                # ----------------------------------------------------------
+                # Datos de mercado para comparar: varias referencias reales por
+                # partida (NL con rango p25-p75, CDMX 2026), aunque ninguna
+                # quede validada. Orientativo, con la relación de material.
+                # ----------------------------------------------------------
+                datos_mdo = mercado.datos_mercado(
+                    comparador,
+                    cotizacion.to_dict("records"),
+                    altura_muro=revision_cant.get("altura_muro"),
+                )
+                resumen_mdo = {str(r["partida"]): r for r in datos_mdo["resumen"]}
+
                 with st.expander("Alcances e impuestos a confirmar con el proveedor"):
                     for a in revision_cant["alcances_confirmar"]:
                         st.markdown(f"- {a}")
                     st.caption("No son omisiones comprobadas: confirmar por escrito antes de emitir la orden de compra.")
+
+                st.markdown("#### Datos de mercado para comparar")
+                st.caption(
+                    "Precios reales publicados (NL: licitaciones de obra pública, mediana y rango p25–p75, "
+                    "ajustados por INPC; CDMX: tabulador oficial 2026). Sirven para ubicar el precio cotizado "
+                    "aunque la equivalencia exacta no esté demostrada. Se excluyen materiales distintos y cifras "
+                    "de otra escala."
+                )
+                st.dataframe(
+                    pd.DataFrame([{
+                        "#": r["partida"],
+                        "Concepto": r["concepto"],
+                        "Unidad": r["unidad"],
+                        "P.U. cotizado": _dinero(r["precio_cotizado"]),
+                        "Referencias": f"{r['referencias']} ({r['tipo']})",
+                        "Mínimo observado": _dinero(r["minimo"]),
+                        "Mediana de referencias": _dinero(r["mediana_referencias"]),
+                        "Máximo observado": _dinero(r["maximo"]),
+                        "vs mediana": f"{r['vs_mediana_pct']:+.1f}%" if r["vs_mediana_pct"] is not None else "—",
+                        "Dónde cae el cotizado": r["posicion"],
+                    } for r in datos_mdo["resumen"]]),
+                    use_container_width=True, hide_index=True,
+                )
+                with st.expander("Ver cada referencia de mercado (concepto, precio, rango, registros, fecha)"):
+                    st.dataframe(
+                        pd.DataFrame([{
+                            "#": r["partida"],
+                            "Fuente": r["fuente"],
+                            "Concepto de referencia": r["concepto"],
+                            "Relación": r["relacion"],
+                            "Unidad": r["unidad"],
+                            "Precio (mediana)": _dinero(r["precio"]),
+                            "Rango p25–p75": (f"{_dinero(r['rango_bajo'])} – {_dinero(r['rango_alto'])}"
+                                              if r.get("rango_bajo") else "—"),
+                            "Registros": r["n_registros"],
+                            "Periodo / fecha": r["fecha"],
+                            "Equivalencia": r["equivalencia"],
+                            "Cotizado vs referencia": r["posicion"],
+                        } for r in datos_mdo["referencias"]]),
+                        use_container_width=True, hide_index=True,
+                    )
 
                 with st.expander("Evidencia por fuente (por qué cada referencia cuenta o no)"):
                     evidencia = []
@@ -3692,6 +3746,16 @@ if archivo is not None:
                                 if ev.get("diferencia_unitaria") is not None and cant else None
                             ),
                         })
+                    _mdo = resumen_mdo.get(str(f.get("Partida")), {})
+                    fila_csv.update({
+                        "Mercado · referencias": _mdo.get("referencias"),
+                        "Mercado · tipo": _mdo.get("tipo"),
+                        "Mercado · mínimo": _mdo.get("minimo"),
+                        "Mercado · mediana": _mdo.get("mediana_referencias"),
+                        "Mercado · máximo": _mdo.get("maximo"),
+                        "Mercado · cotizado vs mediana %": _mdo.get("vs_mediana_pct"),
+                        "Mercado · posición": _mdo.get("posicion"),
+                    })
                     fila_csv.update({
                         "Semáforo final": fin_["semaforo"],
                         "Referencia": fin_["referencia_negociacion"] or "",
@@ -3713,10 +3777,27 @@ if archivo is not None:
                     mime="text/csv",
                 )
                 st.download_button(
-                    "Descargar revisión en Excel (Resumen, Cantidades, Por fuente, Evidencia, Metodología)",
+                    "Descargar CSV de datos de mercado (cada referencia real)",
+                    data=pd.DataFrame(datos_mdo["referencias"]).rename(columns={
+                        "partida": "#", "concepto_cotizado": "Concepto cotizado",
+                        "precio_cotizado": "P.U. cotizado", "fuente": "Fuente",
+                        "concepto": "Concepto de referencia", "relacion": "Relación",
+                        "unidad": "Unidad", "precio": "Precio (mediana)",
+                        "rango_bajo": "Rango p25", "rango_alto": "Rango p75",
+                        "n_registros": "Registros", "fecha": "Periodo / fecha",
+                        "equivalencia": "Equivalencia", "posicion": "Cotizado vs referencia",
+                        "nota": "Nota", "score": "Similitud texto", "confianza": "Confianza texto",
+                        "precio_ml": "Precio por ml (origen)",
+                    }).to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"mercado_{nombre_proveedor}_{nombre_proyecto}.csv",
+                    mime="text/csv",
+                )
+                st.download_button(
+                    "Descargar revisión en Excel (Resumen, Cantidades, Mercado, Por fuente, Evidencia, Metodología)",
                     data=exportar_revision.generar_excel(
                         tabla.to_dict("records"), proveedor=proveedor, proyecto=proyecto,
                         revision_cantidades=revision_cant, configuracion=configuracion_ia,
+                        datos_mercado=datos_mdo,
                     ),
                     file_name=f"revision_{nombre_proveedor}_{nombre_proyecto}.xlsx",
                     mime=(

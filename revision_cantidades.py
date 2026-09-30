@@ -212,4 +212,6 @@ def revisar(partidas: list[dict], total_declarado=None, contexto: str = "") -> d
         "partidas_con_error": sum(1 for a in aritmetica if not a["ok"]),
         "hallazgos": hallazgos,
         "alcances_confirmar": alcances,
+        "altura_muro": altura,
+        "longitud": longitud,
     }

@@ -939,6 +939,76 @@ class ComparadorMultiFuente:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Datos de mercado para comparar: varias referencias por fuente
+    # ------------------------------------------------------------------
+    def _top_pool(self, pools, t, u, k, text_col='concepto_norm', umbral=UMBRAL_CONFIANZA_BAJA):
+        pool = pools.get(u)
+        if pool is None or pool.empty:
+            return []
+        choices = pool[text_col].fillna("").tolist()
+        resultados = {}
+        for consulta in dict.fromkeys([t, consulta_catalogo(t)]):
+            if not consulta:
+                continue
+            pre = process.extract(consulta, choices, scorer=fuzz.token_set_ratio,
+                                  score_cutoff=max(umbral - 25, 30), limit=60)
+            for texto, _, indice in pre:
+                score = score_combinado(consulta, texto)
+                if score < umbral or len(str(texto).strip()) < 8:
+                    continue
+                if not validar_compatibilidad_tecnica(consulta, texto)[0]:
+                    continue
+                if indice not in resultados or score > resultados[indice]:
+                    resultados[indice] = score
+        mejores = sorted(resultados.items(), key=lambda par: -par[1])[:k]
+        return [(score, pool.iloc[indice]) for indice, score in mejores]
+
+    def candidatos(self, descripcion: str, unidad: str, k: int = 3,
+                   ajustar_inflacion: bool = True) -> list[dict]:
+        """Hasta k referencias reales por fuente (NL y CDMX) para comparar.
+
+        NL entrega mediana y rango p25-p75 de precios contratados, con número
+        de registros y año; CDMX el precio del tabulador oficial 2026. Son
+        datos reales publicados, pero NO validados como equivalentes: sirven
+        para ubicar el precio cotizado frente al mercado.
+        """
+        t = normalize_text(descripcion)
+        u = normalize_unit(unidad)
+        salida = []
+        for score, row in self._top_pool(self._nl_pools, t, u, k):
+            anio = str(row['fecha_max'])[:4]
+            aj = (lambda x: ajustar_precio(x, anio)) if ajustar_inflacion else float
+            salida.append({
+                'fuente': 'Nuevo León',
+                'concepto': row['concepto_homologado'],
+                'unidad': row['unidad'],
+                'precio': round(aj(row['precio_mediana']), 2),
+                'rango_bajo': round(aj(row['precio_p25']), 2),
+                'rango_alto': round(aj(row['precio_p75']), 2),
+                'n_registros': int(row['n_registros']),
+                'fecha': f"{str(row['fecha_min'])[:7]} a {str(row['fecha_max'])[:7]}",
+                'nota': 'mediana y rango p25-p75 de precios contratados, ajustados por INPC'
+                        if ajustar_inflacion else 'mediana y rango p25-p75 de precios contratados',
+                'score': round(score, 1),
+                'confianza': nivel_confianza(score),
+            })
+        for score, row in self._top_pool(self._cdmx_pools, t, u, k):
+            salida.append({
+                'fuente': 'CDMX',
+                'concepto': row['concepto'],
+                'unidad': row['unidad'],
+                'precio': round(float(row['precio_unitario']), 2),
+                'rango_bajo': None,
+                'rango_alto': None,
+                'n_registros': 1,
+                'fecha': '2026-05 (tabulador oficial)',
+                'nota': f"clave {row['clave']}",
+                'score': round(score, 1),
+                'confianza': nivel_confianza(score),
+            })
+        return salida
+
     def evaluar(self, descripcion: str, unidad: str, precio_cotizado: float,
                 min_score: float = UMBRAL_CONFIANZA_MEDIA, scorer=score_combinado,
                 ajustar_inflacion: bool = True, usar_ia: bool = False) -> dict:

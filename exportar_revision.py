@@ -68,7 +68,8 @@ def _clasif(precio, ref):
 
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
-                  revision_cantidades: dict | None = None, configuracion: str = "") -> bytes:
+                  revision_cantidades: dict | None = None, configuracion: str = "",
+                  datos_mercado: dict | None = None) -> bytes:
     if not XLSXWRITER_DISPONIBLE:
         import exportar_revision_respaldo
         return exportar_revision_respaldo.generar_excel(filas, proveedor=proveedor, proyecto=proyecto)
@@ -332,6 +333,66 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         wc.hide_gridlines(2)
         wc.set_landscape()
         wc.fit_to_pages(1, 0)
+
+    # ==================================================================
+    # Hoja: Mercado (referencias reales para comparar, orientativas)
+    # ==================================================================
+    if datos_mercado and datos_mercado.get("resumen"):
+        wmk = wb.add_worksheet("Mercado")
+        wmk.merge_range(0, 0, 0, 10, "Datos de mercado para comparar", f_titulo)
+        wmk.set_row(0, 26)
+        wmk.write(1, 0, "Precios reales publicados: NL = licitaciones de obra pública (mediana y rango p25–p75, "
+                        "ajustado INPC); CDMX = tabulador oficial 2026. Orientativos: la equivalencia exacta no "
+                        "está demostrada. Se excluyen materiales distintos y cifras de otra escala.", f_sub)
+        cab_r = ["#", "Concepto", "Unidad", "P.U. cotizado", "Referencias", "Tipo", "Mínimo",
+                 "Mediana de referencias", "Máximo", "Cotizado vs mediana", "Dónde cae el cotizado"]
+        for c, t in enumerate(cab_r):
+            wmk.write(3, c, t, f_cab)
+        r = 4
+        for m in datos_mercado["resumen"]:
+            R = r + 1
+            wmk.write(r, 0, m["partida"], f_centro)
+            wmk.write(r, 1, m["concepto"], f_txt)
+            wmk.write(r, 2, m["unidad"], f_centro)
+            wmk.write_number(r, 3, m["precio_cotizado"], f_input_mon)
+            wmk.write_number(r, 4, m["referencias"], f_centro)
+            wmk.write(r, 5, m["tipo"], f_txt)
+            for c, campo in ((6, "minimo"), (7, "mediana_referencias"), (8, "maximo")):
+                if m[campo] is not None:
+                    wmk.write_number(r, c, m[campo], f_mon)
+                else:
+                    wmk.write_blank(r, c, None, f_mon)
+            pct = (m["precio_cotizado"] / m["mediana_referencias"] - 1) if m["mediana_referencias"] else ""
+            wmk.write_formula(r, 9, f'=IF(H{R}="","",D{R}/H{R}-1)', f_pct, pct)
+            wmk.write(r, 10, m["posicion"], f_txt)
+            r += 1
+        r += 1
+        cab_d = ["#", "Fuente", "Concepto de referencia", "Relación", "Unidad", "Precio (mediana)",
+                 "Rango p25", "Rango p75", "Registros", "Periodo / fecha", "Equivalencia / cotizado vs referencia"]
+        for c, t in enumerate(cab_d):
+            wmk.write(r, c, t, f_cab)
+        r += 1
+        for ref in datos_mercado["referencias"]:
+            wmk.write(r, 0, ref["partida"], f_centro)
+            wmk.write(r, 1, ref["fuente"], f_txt)
+            wmk.write(r, 2, ref["concepto"], f_txt)
+            wmk.write(r, 3, ref["relacion"], f_txt)
+            wmk.write(r, 4, ref["unidad"], f_centro)
+            wmk.write_number(r, 5, ref["precio"], f_mon)
+            for c, campo in ((6, "rango_bajo"), (7, "rango_alto")):
+                if ref.get(campo):
+                    wmk.write_number(r, c, ref[campo], f_mon)
+                else:
+                    wmk.write_blank(r, c, None, f_mon)
+            wmk.write_number(r, 8, ref["n_registros"], f_centro)
+            wmk.write(r, 9, ref["fecha"], f_txt)
+            wmk.write(r, 10, f"{ref['equivalencia']} · {ref['posicion']}", f_txt)
+            r += 1
+        for c, ancho in enumerate([5, 44, 10, 36, 14, 22, 12, 16, 12, 18, 44]):
+            wmk.set_column(c, c, ancho)
+        wmk.hide_gridlines(2)
+        wmk.set_landscape()
+        wmk.fit_to_pages(1, 0)
 
     # ==================================================================
     # Hoja 3: Por fuente (semáforo por fuente calculado con fórmula)
