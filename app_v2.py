@@ -3408,7 +3408,27 @@ if archivo is not None:
                             estilo_v[col_e] = "color: #8a6100"
                         else:
                             estilo_v[col_e] = "color: #98a2b3"
-                    fila_v["Semáforo final"] = _SEMAFORO.get(fin_["semaforo"], fin_["semaforo"])
+                    _texto_final = _SEMAFORO.get(fin_["semaforo"], fin_["semaforo"])
+                    _nombres_clas = {"ALTO": "caro", "BAJO": "barato", "EN MERCADO": "en mercado"}
+                    if fin_["semaforo"] == "MIXTO":
+                        # Decir qué dice cada fuente en vez de solo "mixto".
+                        _texto_final = "🟠 " + " · ".join(
+                            f"{_nombres_clas.get(ev['clasificacion'], ev['clasificacion'])} vs {nombre}"
+                            for clave, nombre in _FUENTES
+                            for ev in [evs[clave]] if ev["estado"] == validacion.VALIDADA
+                        )
+                    elif fin_["semaforo"] in ("NO CONCLUYENTE", "SIN DATOS SUFICIENTES"):
+                        # Pista orientativa (no decide): qué dicen las referencias no validadas.
+                        _pistas = [
+                            f"{nombre} {ev['diferencia_pct']:+.0f}%"
+                            for clave, nombre in _FUENTES
+                            for ev in [evs[clave]]
+                            if ev["estado"] in (validacion.NO_CONCLUYENTE, validacion.POR_CONFIRMAR)
+                            and ev["diferencia_pct"] is not None
+                        ]
+                        if _pistas:
+                            _texto_final += " (orientativo: " + ", ".join(_pistas) + ")"
+                    fila_v["Semáforo final"] = _texto_final
                     fila_v["Validada en"] = fin_["fuentes_validadas"] or "—"
                     fila_v["Negociar contra"] = fin_["referencia_negociacion"] or "—"
                     fila_v["P.U. negociación"] = _dinero(fin_["precio_negociacion"])
