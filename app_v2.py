@@ -143,6 +143,21 @@ busqueda_ia_disponible = busqueda_mercado_ia.busqueda_disponible()
 # duplicarla en dos archivos.
 _revision_ia_descarta = revision_ia.debe_descartarse
 
+def _baja_sin_confirmar(fuente_dict):
+    """Coincidencia de confianza BAJA que la IA no confirmó.
+
+    Su precio se muestra como referencia "por confirmar", pero no vota en
+    el semáforo final: un texto poco parecido puede ser otro concepto
+    (ej. "columnas para amarrar barda" contra bases de columnas metálicas).
+    """
+    if not fuente_dict or not fuente_dict.get("match"):
+        return False
+    if str(fuente_dict.get("confianza", "")).upper() != "BAJA":
+        return False
+    revision = fuente_dict.get("revision_ia") or {}
+    return revision.get("veredicto") != "CONFIRMA"
+
+
 def _alcance_distinto(cotizado, referencia):
     """Descarta diferencias explícitas de alcance que alteran el precio unitario."""
     original = normalizar_texto(cotizado or "")
@@ -1235,7 +1250,7 @@ def leer_pdf(archivo):
                     )
 
     patron_renglon_precio = re.compile(
-        r"^(?:(\d+(?:\.\d+)?)\s+)?"
+        r"^(?:(\d+(?:\.\d+)?)[.\-)]?\s+)?"
         r"(.*?)"
         r"\b(M2|M3|ML|M|PZA|PZAS|SERVICIO|LOTE|KG|TON)\b"
         r"\s+([\d,]+(?:\.\d+)?)"
@@ -1261,10 +1276,28 @@ def leer_pdf(archivo):
         "notas y condiciones",
     ]
 
+    # Encabezado de la tabla ("CONCEPTO UNIDAD CANTIDAD PRECIO ...").
+    # Todo lo que venga antes (título del documento, datos del cliente)
+    # no es descripción de ninguna partida y se descarta al llegar aquí.
+    palabras_encabezado = (
+        "concepto", "descripcion", "unidad", "cantidad",
+        "precio", "importe", "p u", "total",
+    )
+
+    def _es_encabezado_tabla(texto_normalizado):
+        return sum(
+            palabra in texto_normalizado
+            for palabra in palabras_encabezado
+        ) >= 3 and not re.search(r"\d+\.\d{2}", texto_normalizado)
+
     for numero_pagina, linea in lineas_pdf:
         linea_normalizada = normalizar_texto(
             linea
         )
+
+        if _es_encabezado_tabla(linea_normalizada):
+            descripcion_acumulada = []
+            continue
 
         # Los títulos de sección marcan una partida nueva.
         if re.match(
@@ -2534,7 +2567,7 @@ if archivo is not None:
                         for item in lote:
                             respuesta = respuesta_lote.get(item["id"])
                             if respuesta and respuesta.get("tiene_dato") and respuesta.get("precio_mxn"):
-                                clave = (item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                                clave = ("fuente-verificada-v5", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                                 cache_precios_ia[clave] = respuesta
 
                         completadas = min(
@@ -2722,15 +2755,18 @@ if archivo is not None:
                     if cdmx_rechazado_por_ia and _resultado_cdmx:
                         _resultado_cdmx = f"{_resultado_cdmx} (descartado: {motivo_descarte_cdmx})"
 
+                    nl_cuenta = not nl_rechazado_por_ia and not _baja_sin_confirmar(nl)
+                    cdmx_cuenta = not cdmx_rechazado_por_ia and not _baja_sin_confirmar(cdmx)
+                    if nl.get("match") and _baja_sin_confirmar(nl) and not nl_rechazado_por_ia and _resultado_nl:
+                        _resultado_nl = f"{_resultado_nl} (por confirmar)"
+                    if cdmx.get("match") and _baja_sin_confirmar(cdmx) and not cdmx_rechazado_por_ia and _resultado_cdmx:
+                        _resultado_cdmx = f"{_resultado_cdmx} (por confirmar)"
+
                     clasificaciones = [
                         valor
                         for valor in (
-                            nl.get("clasificacion")
-                            if not nl_rechazado_por_ia
-                            else None,
-                            cdmx.get("clasificacion")
-                            if not cdmx_rechazado_por_ia
-                            else None,
+                            nl.get("clasificacion") if nl_cuenta else None,
+                            cdmx.get("clasificacion") if cdmx_cuenta else None,
                         )
                         if valor
                     ]
@@ -2742,12 +2778,8 @@ if archivo is not None:
                     referencias_precio = [
                         valor
                         for valor in (
-                            nl.get("precio_mediana_ajustada")
-                            if not nl_rechazado_por_ia
-                            else None,
-                            cdmx.get("precio_referencia")
-                            if not cdmx_rechazado_por_ia
-                            else None,
+                            nl.get("precio_mediana_ajustada") if nl_cuenta else None,
+                            cdmx.get("precio_referencia") if cdmx_cuenta else None,
                         )
                         if valor
                     ]
@@ -2804,6 +2836,7 @@ if archivo is not None:
                         if (
                             consulta_historico.get("clasificacion")
                             and not historico_rechazado_por_ia
+                            and not _baja_sin_confirmar(consulta_historico)
                         ):
 
                             clasificaciones.append(
@@ -2856,7 +2889,18 @@ if archivo is not None:
                             for clasificacion in set(clasificaciones)
                         }
 
-                        fila["RESULTADO FINAL"] = max(conteo, key=conteo.get)
+                        _maximo = max(conteo.values())
+                        _empatados = [c for c, n in conteo.items() if n == _maximo]
+                        if len(_empatados) == 1 or not referencias_precio:
+                            fila["RESULTADO FINAL"] = _empatados[0]
+                        else:
+                            # Empate entre fuentes (ej. NL dice ALTO y CDMX
+                            # EN MERCADO): se desempata contra el promedio de
+                            # las referencias válidas, con el mismo ±5%.
+                            _promedio_empate = sum(referencias_precio) / len(referencias_precio)
+                            fila["RESULTADO FINAL"] = clasificar(
+                                precio, *banda_en_mercado(_promedio_empate)
+                            )
 
                     else:
 
@@ -3219,8 +3263,9 @@ if archivo is not None:
                 # ------------------------------------------------------------
                 st.markdown("#### Comparativo por partida")
                 st.caption(
-                    "🔴 Cotizado alto · 🟡 En mercado · 🟢 Cotizado bajo · "
-                    "Gris: sin referencia validada. Los precios son unitarios; "
+                    "🔴 Cotizado alto · 🟡 En mercado (±5%) · 🟢 Cotizado bajo · "
+                    "Gris: sin referencia validada; en cursiva, coincidencia débil "
+                    "por confirmar (no cuenta para el semáforo). Los precios son unitarios; "
                     "el total corresponde a cantidad × precio cotizado."
                 )
 
@@ -3270,13 +3315,9 @@ if archivo is not None:
                             "descartado", case=False, na=False
                         )
                         comparativo.loc[_descartados, _precio_col] = float("nan")
-                for _precio_col, _confianza_col in (
-                    ("Precio histórico", "Confiabilidad histórico"),
-                    ("Precio Nuevo León", "Confiabilidad Nuevo León"),
-                    ("Precio CDMX", "Confiabilidad CDMX"),
-                ):
-                    _baja = comparativo[_confianza_col].astype(str).str.upper().eq("BAJA")
-                    comparativo.loc[_baja, _precio_col] = float("nan")
+                # Las coincidencias de confianza BAJA ya no se ocultan: se
+                # muestran con el precio en gris y la etiqueta "por
+                # confirmar", y no cuentan para el semáforo final.
 
                 _motor_ia = _columna("Motor IA")
                 comparativo["Confiabilidad IA"] = [
@@ -3298,8 +3339,25 @@ if archivo is not None:
                             lambda v: _texto_visible(v) or "—"
                         )
 
+                # Columnas finales: el veredicto combinado de la partida y
+                # contra qué precio negociar. Sin esto la tabla solo
+                # mostraba los precios de cada fuente y nunca el resultado.
+                _etiquetas_semaforo = {
+                    "ALTO": "🔴 Caro",
+                    "EN MERCADO": "🟡 En mercado",
+                    "BAJO": "🟢 Barato",
+                    "SIN DATOS SUFICIENTES": "⚪ Sin referencia validada",
+                }
+                comparativo["Semáforo"] = _columna("RESULTADO FINAL").map(
+                    lambda v: _etiquetas_semaforo.get(str(v), "⚪ Sin referencia validada")
+                )
+                comparativo["Precio sugerido"] = _columna("Precio sugerido (negociación)")
+                comparativo["% vs referencia"] = _columna("% Diferencia vs referencia")
+                comparativo["Ahorro potencial"] = _columna("Ahorro potencial")
+
                 for _precio in ("Precio", "Precio total", "Precio histórico",
-                                "Precio Nuevo León", "Precio CDMX", "Precio IA"):
+                                "Precio Nuevo León", "Precio CDMX", "Precio IA",
+                                "Precio sugerido", "Ahorro potencial", "% vs referencia"):
                     comparativo[_precio] = pd.to_numeric(comparativo[_precio], errors="coerce")
 
                 _resultado_por_precio = {
@@ -3324,18 +3382,43 @@ if archivo is not None:
                         for indice in data.index:
                             resultado = str(tabla.at[indice, resultado_col]) if resultado_col in tabla else ""
                             valor = comparativo.at[indice, precio_col]
-                            estilos.at[indice, precio_col] = (
-                                "background-color: #f1f3f5; color: #60666d"
-                                if pd.isna(valor) else colores.get(resultado, "")
-                            )
+                            if pd.isna(valor):
+                                estilo = "background-color: #f1f3f5; color: #60666d"
+                            elif "por confirmar" in resultado:
+                                estilo = "background-color: #f1f3f5; color: #60666d; font-style: italic"
+                            else:
+                                estilo = colores.get(resultado, "")
+                            estilos.at[indice, precio_col] = estilo
+                    for indice in data.index:
+                        final = str(tabla.at[indice, "RESULTADO FINAL"]) if "RESULTADO FINAL" in tabla else ""
+                        estilo_final = colores.get(final, "background-color: #e4e7eb; color: #475467")
+                        estilos.at[indice, "Semáforo"] = estilo_final
+                        estilos.at[indice, "% vs referencia"] = (
+                            "" if pd.isna(comparativo.at[indice, "% vs referencia"]) else estilo_final
+                        )
+                        if final == "ALTO" and pd.notna(comparativo.at[indice, "Precio sugerido"]):
+                            estilos.at[indice, "Precio sugerido"] = "font-weight: 650"
+                            estilos.at[indice, "Ahorro potencial"] = "color: #712121; font-weight: 650"
                     return estilos
 
                 comparativo_vista = comparativo.copy()
                 for _precio in ("Precio", "Precio total", "Precio histórico",
-                                "Precio Nuevo León", "Precio CDMX", "Precio IA"):
+                                "Precio Nuevo León", "Precio CDMX", "Precio IA",
+                                "Precio sugerido", "Ahorro potencial"):
                     comparativo_vista[_precio] = comparativo[_precio].map(
                         lambda v: f"${v:,.2f}" if pd.notna(v) else "—"
                     )
+                for _precio_col, _resultado_col in _resultado_por_precio.items():
+                    if _resultado_col in tabla:
+                        _por_confirmar = tabla[_resultado_col].astype(str).str.contains(
+                            "por confirmar", na=False
+                        ) & comparativo[_precio_col].notna()
+                        comparativo_vista.loc[_por_confirmar, _precio_col] = (
+                            comparativo_vista.loc[_por_confirmar, _precio_col] + " (por confirmar)"
+                        )
+                comparativo_vista["% vs referencia"] = comparativo["% vs referencia"].map(
+                    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"
+                )
                 st.dataframe(
                     comparativo_vista.style.apply(_estilo_precio, axis=None),
                     use_container_width=True,
