@@ -39,7 +39,9 @@ MODELO_POR_DEFECTO = "gemini-3.5-flash"
 # Si el modelo por defecto no existe para esta API key (404 / NOT_FOUND),
 # se prueba el siguiente en vez de dejar la 4a fuente vacia. Se puede
 # forzar uno con 'gemini_model' en Secrets.
-MODELOS_RESPALDO = ("gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash")
+MODELOS_RESPALDO = (
+    "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash",
+)
 _modelo_que_funciono = {"nombre": None}
 
 # Menos partidas por lote que revision_ia.TAMANO_LOTE (8): cada partida aqui
@@ -245,8 +247,14 @@ def _modelos_a_probar(modelo=None):
 
 
 def _es_error_de_modelo(error):
+    """Errores que se resuelven probando OTRO modelo: el modelo no existe
+    para esta clave, o se agoto la cuota de ese modelo en particular (cada
+    modelo tiene su propia cuota gratuita)."""
     texto = str(error).lower()
-    return "not_found" in texto or "404" in texto or "not found" in texto or "is not supported" in texto
+    return any(marca in texto for marca in (
+        "not_found", "404", "not found", "is not supported",
+        "429", "resource_exhausted", "quota",
+    ))
 
 
 def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
@@ -402,6 +410,15 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
             "tiene_dato": precio is not None,
             "motor": f"Gemini (Google Search, {_modelo_que_funciono['nombre']})",
         }
+    if salida and not any(v["tiene_dato"] for v in salida.values()):
+        # Diagnóstico visible en la app: Gemini sí respondió, pero ningún
+        # precio pasó la validación (por eso se recurre a Tavily).
+        motivos = sorted({v["nota"] for v in salida.values()})
+        _registrar_error(
+            f"Gemini ({_modelo_que_funciono['nombre']}) respondió, pero ningún precio "
+            f"pasó la validación. Sitios consultados: {sorted(dominios_consultados) or 'ninguno'}. "
+            f"Motivos: {' | '.join(motivos)[:400]}"
+        )
     return salida
 
 

@@ -483,7 +483,16 @@ def revisar_coincidencias_debiles_lote(items, api_key=None, modelo=None):
         "mismo material/servicio (aunque este redactado distinto). "
         "RECHAZA si son materiales o servicios distintos aunque "
         "compartan palabras o medidas sueltas. NO_SEGURO si de "
-        "verdad no se puede saber con la informacion dada."
+        "verdad no se puede saber con la informacion dada.\n\n"
+        "Equivalencias de obra en Mexico que debes considerar el MISMO "
+        "concepto: 'Armex' es acero de refuerzo prefabricado (varillas + "
+        "estribos), equivale a un armado con varillas de la misma seccion; "
+        "'block del numero 6' = block de 15 cm (15x20x40), 'del 4' = 10 cm, "
+        "'del 8' = 20 cm; las 'columnas' de una barda de block son "
+        "castillos; 'cerramiento' = cadena o dala de cerramiento; "
+        "'concreto hecho en obra' = elaborado en obra. Diferencias menores "
+        "de resistencia del concreto (f'c 150 vs 200) no cambian el "
+        "concepto. Si la unica diferencia es de este tipo, CONFIRMA."
     )
 
     max_tokens = min(4000, 150 + 120 * len(items))
@@ -630,6 +639,13 @@ def debe_descartarse(fuente: dict, usar_ia: bool):
         return True, 'la IA rechazó el match'
 
     if veredicto == 'NO_SEGURO':
+        # "No estoy segura" solo descarta coincidencias que ya eran
+        # debiles. Con "revisar TODAS" activado, la IA tambien revisa
+        # coincidencias de confianza ALTA/MEDIA; un NO_SEGURO ahi no debe
+        # tirar un match de texto bueno (caso real: cerramiento 15x20
+        # hecho en obra descartado solo porque la cotizacion dice Armex).
+        if str(fuente.get('confianza', '')).upper() in ('ALTA', 'MEDIA') and not fuente.get('motivo'):
+            return False, None
         return True, 'la IA no pudo confirmar el match con seguridad'
 
     return False, None
