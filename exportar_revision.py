@@ -97,6 +97,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     f_input_num = fmt(num_format="#,##0.00", font_color="#0000FF")
     f_input_mon = fmt(num_format="$#,##0.00", font_color="#0000FF")
     f_mon = fmt(num_format='$#,##0.00;($#,##0.00);"—"')
+    f_dif_mon = fmt(num_format="$#,##0.00;-$#,##0.00")   # mismo signo que en pantalla
     f_mon_neg = fmt(num_format='$#,##0.00;($#,##0.00);"—"', bold=True)
     f_pct = fmt(num_format='+0.0%;-0.0%;0.0%')
     f_pct_b = fmt(num_format="0.0%", bold=True)
@@ -108,6 +109,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         "BAJO": fmt(num_format="$#,##0.00", bg_color=VERDE_F, font_color=VERDE_T, bold=True),
         "EN MERCADO": fmt(num_format="$#,##0.00", bg_color=AMBAR_F, font_color=AMBAR_T, bold=True),
         "ORIENTATIVA": fmt(num_format="$#,##0.00", bg_color="#F1F3F5", font_color="#60666D", italic=True),
+        # Orientativas con color claro según caro / en mercado / barato.
+        "O_ALTO": fmt(num_format="$#,##0.00", bg_color="#FDE4E4", font_color="#8A2B2B", italic=True),
+        "O_BAJO": fmt(num_format="$#,##0.00", bg_color="#E3F4E7", font_color="#1F6B3A", italic=True),
+        "O_EN MERCADO": fmt(num_format="$#,##0.00", bg_color="#FFF6D6", font_color="#7A5D00", italic=True),
         "RECHAZADA": fmt(num_format="$#,##0.00", font_color="#98A2B3", font_strikeout=True),
         "": f_mon,
     }
@@ -123,8 +128,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         estado = ev.get("estado")
         if estado == v.VALIDADA:
             return f_ref.get(ev.get("clasificacion") or "", f_mon)
-        if estado in (v.NO_CONCLUYENTE, v.POR_CONFIRMAR):
-            return f_ref["ORIENTATIVA"]
+        if estado in v.ORIENTATIVAS:
+            return f_ref.get("O_" + (ev.get("clasificacion") or ""), f_ref["ORIENTATIVA"])
         if estado == v.RECHAZADA:
             return f_ref["RECHAZADA"]
         return f_mon
@@ -305,22 +310,30 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             r += 1
             if h["escenarios"]:
                 wc.merge_range(r, 0, r, 2, "Escenario", f_cab)
-                for c, t in zip(range(3, 8), ["Fórmula", "m² esperados", "m² cotizados",
-                                              "Diferencia m²", "Importe sujeto a aclaración"]):
+                for c, t in zip(range(3, 8), ["Fórmula / base", "m² del escenario", "m² cotizados",
+                                              "Diferencia m² (cotizado − escenario)",
+                                              "Diferencia × P.U. cotizado (sujeto a aclaración, no es ahorro)"]):
                     wc.write(r, c, t, f_cab)
                 r += 1
-                cant = next((a["cantidad"] for a in revision_cantidades["aritmetica"]
-                             if str(a["partida"]) == str(h["partidas"])), 0) or 0
-                pu = next((a["precio_unitario"] for a in revision_cantidades["aritmetica"]
-                           if str(a["partida"]) == str(h["partidas"])), 0) or 0
+                idx = next((i for i, a in enumerate(revision_cantidades["aritmetica"])
+                            if str(a["partida"]) == str(h["partidas"])), None)
+                cant = revision_cantidades["aritmetica"][idx]["cantidad"] if idx is not None else 0
+                cant = cant or 0
+                # Fila de la partida en la tabla de aritmética de esta hoja
+                # (cantidad en D, P.U. en E): una sola captura.
+                fila_part = 5 + idx if idx is not None else None
                 for e in h["escenarios"]:
                     R = r + 1
                     wc.merge_range(r, 0, r, 2, e["nombre"], f_txt)
-                    wc.write(r, 3, e["formula"], f_centro)
+                    wc.write(r, 3, f"{e['formula']} · {e.get('base', '')}", f_centro)
                     wc.write_number(r, 4, e["m2"], fmt(num_format="#,##0.00"))
-                    wc.write_number(r, 5, cant, f_input_num)
-                    wc.write_formula(r, 6, f"=F{R}-E{R}", fmt(num_format="#,##0.00"), e["dif_m2"])
-                    wc.write_formula(r, 7, f"=MAX(0,G{R})*{pu}", f_mon, e["importe"])
+                    if fila_part:
+                        wc.write_formula(r, 5, f"=D{fila_part}", fmt(num_format="#,##0.00"), cant)
+                        wc.write_formula(r, 7, f"=G{R}*E{fila_part}", f_dif_mon, e["importe"])
+                    else:
+                        wc.write_number(r, 5, cant, f_input_num)
+                        wc.write_number(r, 7, e["importe"], f_dif_mon)
+                    wc.write_formula(r, 6, f"=F{R}-E{R}", fmt(num_format="#,##0.00;-#,##0.00"), e["dif_m2"])
                     r += 1
             r += 1
         wc.merge_range(r, 0, r, 7, "Alcances e impuestos a confirmar por escrito", f_cab)

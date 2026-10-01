@@ -142,21 +142,45 @@ def revisar(partidas: list[dict], total_declarado=None, contexto: str = "") -> d
         if not (area_muro and cant and _DOS_CARAS.search(texto)):
             continue
         e1 = round(2 * area_muro, 2)
-        escenarios = [{"nombre": "E1 – solo las 2 caras del muro", "formula": f"{area_muro:g} × 2", "m2": e1}]
+        escenarios = [{"nombre": "E1 – solo las 2 caras del muro", "formula": f"{area_muro:g} × 2", "m2": e1,
+                       "base": "medida de la cotización"}]
+        # Variante con la longitud del cerramiento (27 ml) y la altura del
+        # muro declarada (0.60 m): también usa solo medidas de la cotización.
+        if longitud_lineal and altura and abs(longitud_lineal * altura - area_muro) > 0.01:
+            escenarios.append({
+                "nombre": "E1b – 2 caras con la longitud del cerramiento",
+                "formula": f"{longitud_lineal:g} × {altura:g} × 2",
+                "m2": round(longitud_lineal * altura * 2, 2),
+                "base": "medida de la cotización",
+            })
         if longitud:
             e2 = round(e1 + 2 * longitud * ALTURA_CERRAMIENTO_SUPUESTA, 2)
             e3 = round(e2 + longitud * ANCHO_CORONA_SUPUESTO, 2)
             escenarios += [
                 {"nombre": f"E2 – E1 + 2 caras del cerramiento (supuesto h={ALTURA_CERRAMIENTO_SUPUESTA:g} m)",
-                 "formula": f"{e1:g} + {longitud:g}×{ALTURA_CERRAMIENTO_SUPUESTA:g}×2", "m2": e2},
+                 "formula": f"{e1:g} + {longitud:g}×{ALTURA_CERRAMIENTO_SUPUESTA:g}×2", "m2": e2,
+                 "base": "incluye medidas supuestas"},
                 {"nombre": f"E3 – E2 + corona (supuesto {ANCHO_CORONA_SUPUESTO:g} m)",
-                 "formula": f"{e2:g} + {longitud:g}×{ANCHO_CORONA_SUPUESTO:g}", "m2": e3},
+                 "formula": f"{e2:g} + {longitud:g}×{ANCHO_CORONA_SUPUESTO:g}", "m2": e3,
+                 "base": "incluye medidas supuestas"},
             ]
+        # Diferencia = cantidad cotizada − cantidad del escenario; importe =
+        # esa diferencia × P.U. cotizado. Positivo = el proveedor cobra más m²
+        # de los que da el escenario. Es un importe SUJETO A ACLARACIÓN, no
+        # un ahorro.
         for e in escenarios:
             e["dif_m2"] = round(cant - e["m2"], 2)
-            e["importe"] = round(max(0.0, e["dif_m2"]) * pu, 2)
+            e["importe"] = round(e["dif_m2"] * pu, 2)
         maximo = max(e["m2"] for e in escenarios)
         excede = cant > maximo * 1.05
+        # Los escenarios se presentan por separado, no como intervalo: E1 usa
+        # solo medidas de la cotización; E2 y E3 agregan superficies con
+        # medidas SUPUESTAS, así que no fijan un límite de la aclaración.
+        lista = "; ".join(
+            f"{e['nombre'].split(' –')[0]} ({e['base']}): {e['m2']:g} m², "
+            f"{e['dif_m2']:g} m² de diferencia, ${e['importe']:,.2f} sujetos a aclaración"
+            for e in escenarios
+        )
         hallazgos.append({
             "tipo": "Cantidad de acabado a dos caras",
             "nivel": "REVISAR" if excede else "OK",
@@ -164,10 +188,9 @@ def revisar(partidas: list[dict], total_declarado=None, contexto: str = "") -> d
             "detalle": (
                 f"Se cotizan {cant:g} m² de {_ACABADO.search(texto).group(1).lower()} a dos caras sobre "
                 f"{area_muro:g} m² de muro. "
-                + (f"Ni el escenario más amplio ({maximo:g} m²) llega a {cant:g} m²: "
-                   f"entre ${escenarios[-1]['importe']:,.2f} y ${escenarios[0]['importe']:,.2f} "
-                   "sujetos a aclaración. Pueden existir superficies no descritas (pretil, remates): "
-                   "pedir generador." if excede else "La cantidad es coherente con el área del muro.")
+                + (f"Ningún escenario llega a {cant:g} m². Escenarios por separado — {lista}. "
+                   "No son ahorros. E2 y E3 dependen de medidas supuestas; pueden existir superficies no descritas "
+                   "(pretil, remates): pedir generador." if excede else "La cantidad es coherente con el área del muro.")
             ),
             "escenarios": escenarios,
         })

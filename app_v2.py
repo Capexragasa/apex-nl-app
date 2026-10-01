@@ -3280,23 +3280,41 @@ if archivo is not None:
                     for clave, nombre in _FUENTES:
                         ev = f["_evaluaciones"][clave]
                         dictamen = _ABREV.get(ev["estado"], ev["estado"])
-                        if ev["estado"] in (validacion.VALIDADA, *validacion.ORIENTATIVAS) and ev["clasificacion"]:
-                            dictamen += f" · {_CLAS.get(ev['clasificacion'], '')}"
+                        if ev["estado"] == validacion.VALIDADA and ev["clasificacion"]:
+                            dictamen = {"ALTO": "Caro", "EN MERCADO": "En mercado", "BAJO": "Barato"}.get(
+                                ev["clasificacion"], dictamen)
+                        elif ev["estado"] in validacion.ORIENTATIVAS:
+                            # El % se conserva como diferencia orientativa; el
+                            # dictamen no afirma caro/barato sin validación.
+                            dictamen = "Pendiente de validar"
                         fila_v[f"{nombre} · precio"] = _dinero(ev["precio_referencia"])
                         fila_v[f"{nombre} · dictamen"] = dictamen
                         fila_v[f"{nombre} · %"] = (
                             f"{ev['diferencia_pct']:+.0f}%" if ev["diferencia_pct"] is not None else "—"
                         )
+                        # Color siempre según caro / en mercado / barato:
+                        # fuerte y en negritas si la referencia está VALIDADA;
+                        # tono claro en cursiva si es orientativa. Rechazada,
+                        # tachada en gris.
+                        _cols = (f"{nombre} · precio", f"{nombre} · dictamen", f"{nombre} · %")
                         if ev["estado"] == validacion.VALIDADA:
-                            estilo_v[f"{nombre} · precio"] = {
-                                "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
-                                "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 650",
-                                "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 650",
+                            _est = {
+                                "ALTO": "background-color: #f3a5a5; color: #5c1414; font-weight: 700",
+                                "BAJO": "background-color: #a8dbb4; color: #0f3d21; font-weight: 700",
+                                "EN MERCADO": "background-color: #ffe08a; color: #5c4300; font-weight: 700",
+                            }.get(ev["clasificacion"], "")
+                        elif ev["estado"] in validacion.ORIENTATIVAS and ev["clasificacion"]:
+                            _est = {
+                                "ALTO": "background-color: #fde4e4; color: #8a2b2b; font-style: italic",
+                                "BAJO": "background-color: #e3f4e7; color: #1f6b3a; font-style: italic",
+                                "EN MERCADO": "background-color: #fff6d6; color: #7a5d00; font-style: italic",
                             }.get(ev["clasificacion"], "")
                         elif ev["estado"] == validacion.RECHAZADA:
-                            estilo_v[f"{nombre} · precio"] = "color: #98a2b3; text-decoration: line-through"
-                        elif ev["estado"] in validacion.ORIENTATIVAS:
-                            estilo_v[f"{nombre} · precio"] = "color: #60666d; font-style: italic"
+                            _est = "color: #98a2b3; text-decoration: line-through"
+                        else:
+                            _est = ""
+                        for _c in _cols:
+                            estilo_v[_c] = _est
                     filas_vista.append(fila_v)
                     estilos_vista.append(estilo_v)
                 comparativo_vista = pd.DataFrame(filas_vista)
@@ -3307,8 +3325,8 @@ if archivo is not None:
                     use_container_width=True, hide_index=True,
                     height=min(560, 40 + 36 * len(comparativo_vista)),
                 )
-                st.caption("Color = referencia validada (🔴 caro · 🟡 en mercado · 🟢 barato). "
-                           "Gris cursiva = orientativa. Tachado = rechazada.")
+                st.caption("🔴 caro · 🟡 en mercado (±5 %) · 🟢 barato. Color fuerte = referencia validada; "
+                           "color claro en cursiva = orientativa (pendiente de validar). Tachado = rechazada.")
 
                 # ---------------- 3. Acción principal ----------------
                 def _nombre_corto(concepto):
@@ -3479,9 +3497,11 @@ if archivo is not None:
                         st.markdown(f"{_iconos.get(h['nivel'], '•')} **{h['tipo']}** (partida {h['partidas']}): {h['detalle']}")
                         if h["escenarios"]:
                             st.dataframe(pd.DataFrame([{
-                                "Escenario": e["nombre"], "Fórmula": e["formula"], "m² esperados": e["m2"],
-                                "Diferencia vs cotizado (m²)": e["dif_m2"],
-                                "Importe sujeto a aclaración": f"${e['importe']:,.2f}",
+                                "Escenario": e["nombre"], "Fórmula": e["formula"], "Base": e.get("base", ""),
+                                "m² del escenario": e["m2"],
+                                "Diferencia m² (cotizado − escenario)": e["dif_m2"],
+                                "Diferencia × P.U. (sujeta a aclaración)": (
+                                    f"${e['importe']:,.2f}" if e["importe"] >= 0 else f"-${-e['importe']:,.2f}"),
                             } for e in h["escenarios"]]), use_container_width=True, hide_index=True)
                     st.markdown("**Alcances e impuestos a confirmar por escrito**")
                     for a in revision_cant["alcances_confirmar"]:

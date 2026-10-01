@@ -138,28 +138,29 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
         mismos = [r for r in filas if r["relacion"] == "mismo material"]
         base = mismos or [r for r in filas if r["relacion"] != "escenario por pieza"]
         if base:
-            # Puntos de comparación: p25/p75 en NL (no son mínimo ni máximo
-            # absolutos) y precio único en CDMX.
-            puntos = []
-            for r in base:
-                if r.get("rango_bajo") and r.get("rango_alto"):
-                    puntos += [(r["rango_bajo"], f"p25 de {r['fuente']}"), (r["rango_alto"], f"p75 de {r['fuente']}")]
+            # Referencias con especificaciones distintas NO se mezclan en un
+            # solo rango: se toma la MEJOR coincidencia de cada fuente y se
+            # compara por separado. En NL, p25 y p75 son percentiles de
+            # precios contratados (no mínimo ni máximo).
+            nl = next((r for r in base if r["fuente"] == "Nuevo León"), None)
+            cdmx = next((r for r in base if r["fuente"] == "CDMX"), None)
+            partes = []
+            color = "🟡"
+            if nl and nl.get("rango_bajo") and nl.get("rango_alto"):
+                if precio > nl["rango_alto"]:
+                    partes.append(f"por encima del p75 de NL ({(precio / nl['rango_alto'] - 1) * 100:+.0f}%)")
+                    color = "🔴"
+                elif precio < nl["rango_bajo"]:
+                    partes.append(f"por debajo del p25 de NL ({(precio / nl['rango_bajo'] - 1) * 100:+.0f}%)")
+                    color = "🟢" if color != "🔴" else color
                 else:
-                    puntos.append((r["precio"], f"precio {r['fuente']}"))
-            (minimo, etq_min), (maximo, etq_max) = min(puntos), max(puntos)
-            medianas = sorted(r["precio"] for r in base)
-            mediana = medianas[len(medianas) // 2] if len(medianas) % 2 else round(
-                (medianas[len(medianas) // 2 - 1] + medianas[len(medianas) // 2]) / 2, 2)
-            def _desc(etq):
-                return ("percentil 75 de la referencia histórica NL" if etq.startswith("p75") else
-                        "percentil 25 de la referencia histórica NL" if etq.startswith("p25") else
-                        etq)
-            if precio > maximo:
-                pos = f"🔴 por encima del {_desc(etq_max)} ({(precio / maximo - 1) * 100:+.0f}%)"
-            elif precio < minimo:
-                pos = f"🟢 por debajo del {_desc(etq_min)} ({(precio / minimo - 1) * 100:+.0f}%)"
-            else:
-                pos = "🟡 dentro del rango de referencias"
+                    partes.append("entre p25 y p75 de NL")
+            elif nl:
+                partes.append(f"{(precio / nl['precio'] - 1) * 100:+.0f}% vs NL")
+            if cdmx:
+                dif = (precio / cdmx["precio"] - 1) * 100
+                partes.append(f"{dif:+.0f}% vs CDMX")
+            pos = f"{color} " + "; ".join(partes) if partes else "⚪ sin referencia comparable"
             resumen.append({
                 "partida": p.get("partida"),
                 "concepto": concepto,
@@ -167,12 +168,25 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
                 "precio_cotizado": precio,
                 "referencias": len(base),
                 "tipo": "mismo material" if mismos else "solo conceptos relacionados",
-                "minimo_etiqueta": etq_min,
-                "maximo_etiqueta": etq_max,
-                "minimo": round(minimo, 2),
-                "mediana_referencias": round(mediana, 2),
-                "maximo": round(maximo, 2),
-                "vs_mediana_pct": round((precio / mediana - 1) * 100, 1) if mediana else None,
+                # Mejor coincidencia de NL (percentiles de precios contratados)
+                "nl_concepto": nl["concepto"] if nl else None,
+                "nl_p25": nl.get("rango_bajo") if nl else None,
+                "nl_mediana": nl["precio"] if nl else None,
+                "nl_p75": nl.get("rango_alto") if nl else None,
+                "nl_registros": nl.get("n_registros") if nl else None,
+                "nl_periodo": nl.get("fecha") if nl else None,
+                # Mejor coincidencia de CDMX (precio único del tabulador)
+                "cdmx_concepto": cdmx["concepto"] if cdmx else None,
+                "cdmx_precio": cdmx["precio"] if cdmx else None,
+                # Compatibilidad con pantallas y exportaciones existentes
+                "minimo_etiqueta": "p25 NL" if nl and nl.get("rango_bajo") else None,
+                "maximo_etiqueta": "p75 NL" if nl and nl.get("rango_alto") else None,
+                "minimo": nl.get("rango_bajo") if nl else None,
+                "mediana_referencias": nl["precio"] if nl else (cdmx["precio"] if cdmx else None),
+                "maximo": nl.get("rango_alto") if nl else None,
+                "vs_mediana_pct": (
+                    round((precio / (nl["precio"] if nl else cdmx["precio"]) - 1) * 100, 1)
+                ),
                 "posicion": pos,
             })
         else:
@@ -180,6 +194,8 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
             resumen.append({
                 "partida": p.get("partida"), "concepto": concepto, "unidad": unidad,
                 "precio_cotizado": precio, "referencias": 0,
+                "nl_concepto": None, "nl_p25": None, "nl_mediana": None, "nl_p75": None,
+                "nl_registros": None, "nl_periodo": None, "cdmx_concepto": None, "cdmx_precio": None,
                 "minimo_etiqueta": None, "maximo_etiqueta": None,
                 "tipo": ("sin referencias por pieza (hay escenario por ml × altura supuesta)"
                          if escenarios else "sin referencias"),
