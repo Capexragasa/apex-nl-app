@@ -430,22 +430,49 @@ def _confiabilidad(ref: dict) -> str:
     return "BAJA"
 
 
-def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMPO_MAX_PARTIDA) -> dict:
-    """item: {id, descripcion, unidad, precio (opcional)}. buscar(consulta)->lista."""
+ESTADOS_BUSQUEDA = {
+    "precio localizado", "sin referencia localizada", "sin referencia comparable",
+    "tiempo agotado", "cuota agotada", "error de conexión", "búsqueda incompleta",
+}
+
+
+def clasificar_error(texto: str) -> str:
+    t = str(texto).lower()
+    if any(x in t for x in ("429", "quota", "cuota", "rate limit", "ratelimit", "too many requests",
+                            "resource_exhausted", "usage limit")):
+        return "cuota agotada"
+    if any(x in t for x in ("timeout", "timed out", "tiempo")):
+        return "tiempo agotado"
+    return "error de conexión"
+
+
+def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMPO_MAX_PARTIDA,
+                       deadline=None) -> dict:
+    """item: {id, descripcion, unidad, precio (opcional)}. buscar(consulta)->lista.
+    deadline: hora límite TOTAL de la revisión (time.monotonic()); se respeta
+    además del límite por partida y se conserva lo ya encontrado."""
     inicio = time.monotonic()
+    limite = inicio + tiempo_max
+    if deadline is not None:
+        limite = min(limite, deadline)
     descripcion, unidad = item["descripcion"], item["unidad"]
     precio_cot = item.get("precio")
     referencias, consultas_hechas, paginas_leidas, errores, rechazadas = [], [], 0, [], []
     vistas = set()
+    planeadas = consultas_para(descripcion, unidad)
+    tiempo_corto = False
 
-    for consulta in consultas_para(descripcion, unidad):
-        if time.monotonic() - inicio > tiempo_max:
+    for consulta in planeadas:
+        if time.monotonic() >= limite:
+            tiempo_corto = True
             break
         consultas_hechas.append(consulta)
         try:
             resultados = buscar(consulta) or []
         except Exception as error:
             errores.append(str(error)[:160])
+            if clasificar_error(error) == "cuota agotada":
+                break   # sin cuota, las demás búsquedas fallarían igual
             continue
         resultados = [r for r in resultados if r.get("url") and r["url"] not in vistas
                       and not any(x in r["url"].lower() for x in _EXCLUIR_URL)][:PAGINAS_POR_CONSULTA]
@@ -453,7 +480,7 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
 
         def _procesar(r):
             texto = r.get("texto") or ""
-            if not texto and time.monotonic() - inicio < tiempo_max:
+            if not texto and time.monotonic() < limite:
                 texto = leer(r["url"])
             refs = extraer_referencias(texto, descripcion=descripcion, unidad=unidad,
                                        precio_cotizado=precio_cot, url=r["url"], titulo=r.get("titulo", ""),
@@ -479,22 +506,34 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
             break
 
     if not referencias:
+        rech = sorted(rechazadas, key=lambda r: -r.get("similitud", 0))
+        busquedas = " Búsquedas: " + (" | ".join(consultas_hechas) or "ninguna") + "."
+        if errores and not paginas_leidas and not rech:
+            estado = clasificar_error(errores[0])
+            nota = (f"{estado.capitalize()}: no se pudo completar la búsqueda ({errores[0]}). Es un fallo técnico; "
+                    "no indica que no existan precios publicados." + busquedas)
+        elif tiempo_corto and not rech:
+            estado = "tiempo agotado"
+            nota = (f"Tiempo agotado: se hicieron {len(consultas_hechas)} de {len(planeadas)} búsquedas y se "
+                    f"revisaron {paginas_leidas} página(s) sin encontrar referencia. Búsqueda incompleta; no indica "
+                    "que no existan precios publicados." + busquedas)
+        else:
+            estado = "sin referencia comparable" if rech else (
+                "búsqueda incompleta" if errores else "sin referencia localizada")
+            nota = (("Sin referencia comparable: " if rech else "Sin referencia localizada: ")
+                    + f"se revisaron {paginas_leidas} página(s) con {len(consultas_hechas)} búsqueda(s)"
+                    + (f"; se rechazaron {len(rech)} concepto(s) parecido(s) en palabras pero distinto(s): "
+                       + " | ".join(f"{r['codigo'] or ''} {r['concepto'][:70]} (${r['precio']:,.2f}) — {r['motivo']}"
+                                    for r in rech[:3])
+                       if rech else "; ningún renglón tenía el mismo objeto, especificación y unidad.")
+                    + (f" Hubo {len(errores)} error(es) técnico(s) en algunas páginas." if errores else "")
+                    + busquedas
+                    + " No encontrar una referencia en estas búsquedas no demuestra que no existan precios publicados.")
         return {
             "precio_mxn": None, "tiene_dato": False, "verificado": False,
             "unidad_encontrada": "", "fuente_nombre": "", "fuente_url": "",
-            "descripcion_encontrada": "",
-            "nota": (f"No se pudo consultar el buscador de respaldo ({errores[0]})." if errores and not paginas_leidas
-                     else ("Sin referencia comparable: " if rechazadas else "Sin precio comprobable: ")
-                     + f"se revisaron {paginas_leidas} página(s) con {len(consultas_hechas)} búsqueda(s)"
-                     + (f"; se rechazaron {len(rechazadas)} concepto(s) parecido(s) en palabras pero distinto(s): "
-                        + " | ".join(f"{r['codigo'] or ''} {r['concepto'][:70]} (${r['precio']:,.2f}) — {r['motivo']}"
-                                     for r in sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:3])
-                        if rechazadas else "; ningún renglón tenía el mismo material, trabajo y unidad.")
-                     + " Búsquedas: " + " | ".join(consultas_hechas)
-                     + ". No encontrar una referencia en estas búsquedas no demuestra que no existan precios "
-                       "publicados."),
-            "rechazadas": sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:5],
-            "consultas": consultas_hechas, "paginas_revisadas": paginas_leidas,
+            "descripcion_encontrada": "", "estado_busqueda": estado, "nota": nota,
+            "rechazadas": rech[:5], "consultas": consultas_hechas, "paginas_revisadas": paginas_leidas,
         }
 
     for r in referencias:
@@ -531,6 +570,7 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
         "rechazadas": rechazadas[:5],
         "consultas": consultas_hechas,
         "paginas_revisadas": paginas_leidas,
+        "estado_busqueda": "precio localizado",
     }
 
 
@@ -545,7 +585,7 @@ def motor_disponible(tavily_key=None):
         return None, None
 
 
-def investigar_lote(items: list[dict], tavily_key=None, registrar_error=None) -> dict:
+def investigar_lote(items: list[dict], tavily_key=None, registrar_error=None, deadline=None) -> dict:
     nombre, buscar = motor_disponible(tavily_key)
     if not buscar:
         if registrar_error:
@@ -553,7 +593,8 @@ def investigar_lote(items: list[dict], tavily_key=None, registrar_error=None) ->
         return {}
     salida = {}
     with ThreadPoolExecutor(max_workers=3) as ejecutor:
-        tareas = {ejecutor.submit(investigar_partida, it, buscar=buscar): str(it["id"]) for it in items}
+        tareas = {ejecutor.submit(investigar_partida, it, buscar=buscar, deadline=deadline): str(it["id"])
+                  for it in items}
         for tarea in as_completed(tareas):
             id_ = tareas[tarea]
             try:
@@ -561,7 +602,9 @@ def investigar_lote(items: list[dict], tavily_key=None, registrar_error=None) ->
             except Exception as error:
                 if registrar_error:
                     registrar_error(f"Respaldo web ({nombre}): {error}")
-                continue
+                dato = {"precio_mxn": None, "tiene_dato": False, "estado_busqueda": clasificar_error(error),
+                        "nota": f"{clasificar_error(error).capitalize()}: {str(error)[:160]}. Fallo técnico; no "
+                                "indica que no existan precios publicados."}
             dato["motor"] = f"Respaldo web ({nombre}, contenido verificado)"
             salida[id_] = dato
     return salida

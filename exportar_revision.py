@@ -153,6 +153,27 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                                          "bold": True}),
             })
 
+    # Colores que siguen al dictamen (fórmula): si cambian precios, índices
+    # o estados, el color cambia junto con el texto.
+    f_cf = {
+        "Caro": wb.add_format({"bg_color": "#F3A5A5", "font_color": "#5C1414", "bold": True}),
+        "En precio": wb.add_format({"bg_color": "#FFE08A", "font_color": "#5C4300", "bold": True}),
+        "Barato": wb.add_format({"bg_color": "#A8DBB4", "font_color": "#0F3D21", "bold": True}),
+        "Posiblemente caro": wb.add_format({"bg_color": "#FDE4E4", "font_color": "#8A2B2B", "italic": True}),
+        "Posiblemente en precio": wb.add_format({"bg_color": "#FFF6D6", "font_color": "#7A5D00", "italic": True}),
+        "Posiblemente barato": wb.add_format({"bg_color": "#E3F4E7", "font_color": "#1F6B3A", "italic": True}),
+        "Rechazada": wb.add_format({"font_color": "#98A2B3", "font_strikeout": True}),
+        "No comparable": wb.add_format({"font_color": "#98A2B3", "font_strikeout": True}),
+    }
+
+    def colorear_por_dictamen(hoja, rango, celda_dictamen):
+        """Formato condicional del rango según el texto del dictamen."""
+        for texto, formato in sorted(f_cf.items(), key=lambda kv: -len(kv[0])):
+            hoja.conditional_format(rango, {
+                "type": "formula", "criteria": f'={celda_dictamen}="{texto}"',
+                "format": formato, "stop_if_true": True,
+            })
+
     hoy = _dt.date.today()
 
     # ==================================================================
@@ -167,7 +188,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     sub_fuente = ["P.U. ref.", "Diferencia $/u", "% vs ref.", "Dictamen", "Confiab. fuente"]
     NF = len(sub_fuente)
     cab_fin = ["Resultado de los 4 filtros", "Referencia", "Respaldo", "P.U. de referencia",
-               "% vs referencia", "Diferencia contra referencia", "Oportunidad validada (potencial)", "Nota"]
+               "% vs referencia", "Diferencia contra referencia", "Oportunidad validada (potencial)",
+               "Nota (consulta original, no se recalcula)"]
     n_cols = len(cab_ini) + NF * len(FUENTES) + len(cab_fin)
     ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
     ws.set_row(0, 26)
@@ -219,7 +241,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             pf = lambda k: f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 4 + j * PF + k)}"
             col = lambda k: xl_col_to_name(c0 + k)
             ws.write_formula(r, c0, f'=IF({pf(0)}="","",{pf(0)})',
-                             estilo_ref(ev) if ref is not None else f_mon, ref if ref is not None else "")
+                             f_mon, ref if ref is not None else "")
             excluida = estado in (v.RECHAZADA, v.SIN_DATO, v.NO_COMPARABLE)
             ws.write_formula(
                 r, c0 + 1, f'=IF(OR({col(0)}{R}="",{pf(1)}="RECHAZADA",{pf(1)}="SIN DATO",{pf(1)}="NO COMPARABLE"),"",E{R}-{col(0)}{R})',
@@ -228,6 +250,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                 r, c0 + 2, f'=IF({col(1)}{R}="","",E{R}/{col(0)}{R}-1)',
                 f_pct, (precio / ref - 1) if (ref and precio is not None and not excluida) else "")
             ws.write_formula(r, c0 + 3, f"={pf(3)}", f_centro, v.dictamen_texto(ev))
+            colorear_por_dictamen(ws, f"{col(0)}{R}:{col(3)}{R}", f"${col(3)}{R}")
             ws.write_formula(r, c0 + 4, f"={pf(4)}", f_centro, v.confiabilidad_texto(ev))
             celdas_dict.append(f"{col(3)}{R}")
             celdas_ref.append(f"{col(0)}{R}")
@@ -310,6 +333,27 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     ws.write(ultima + 1, 1, "Oportunidad validada sobre el importe", f_bold)
     ws.write_formula(ultima + 1, c_fin + 6, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
                      (total_ahorro / total_importe) if total_importe else "")
+    # Conteos que se recalculan con el resultado de los 4 filtros.
+    col_res = xl_col_to_name(c_fin)
+    rng = f"{col_res}{fila0 + 1}:{col_res}{U}"
+    conteos = [
+        ("Partidas caras (posible o validado)", f'=COUNTIF({rng},"*caro en*")',
+         sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.ALTO)),
+        ("Partidas en precio", f'=COUNTIF({rng},"*en precio en*")',
+         sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.EN_MERCADO)),
+        ("Partidas baratas", f'=COUNTIF({rng},"*barato en*")',
+         sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.BAJO)),
+        ("Filtros no coinciden", f'=COUNTIF({rng},"No coinciden*")',
+         sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.MIXTO)),
+        ("Sin datos", f'=COUNTIF({rng},"Sin datos")',
+         sum(1 for f in filas if not v.resultado_filtros(f.get("_evaluaciones") or {})["clave"])),
+    ]
+    for k, (etq, frm, val) in enumerate(conteos):
+        ws.write(ultima + 3 + k, 1, etq, f_bold)
+        ws.write_formula(ultima + 3 + k, 3, frm, f_centro, val)
+    ws.write(ultima + 9, 1, "Las columnas «Nota» y la evidencia de texto corresponden a la consulta original y no se "
+                            "recalculan con fórmulas; precios, diferencias, dictámenes, colores, resultado y conteos sí.",
+             f_sub)
 
     anchos = [5, 44, 8, 10, 13, 15] + [12, 13, 9, 20, 14] * len(FUENTES) + [24, 16, 20, 14, 12, 16, 15, 44]
     for c, ancho in enumerate(anchos):
@@ -504,7 +548,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     for clave in FUENTES:
         n = NOMBRE_CORTO[clave]
         cab_f += [f"{n}\nP.U. ref.", f"{n}\nestado", f"{n}\n% vs ref.", f"{n}\ndictamen",
-                  f"{n}\nconfiabilidad fuente", f"{n}\nfalta confirmar"]
+                  f"{n}\nconfiabilidad fuente", f"{n}\nfalta confirmar (consulta original)"]
     wf.merge_range(0, 0, 0, len(cab_f) - 1, "Comparación independiente por fuente", f_titulo)
     wf.set_row(0, 26)
     wf.write(1, 0, "Azul = captura. Cambia aquí el P.U. de referencia o el estado (VALIDADA, EQUIVALENCIA PARCIAL, "
@@ -554,6 +598,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                 f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin dato",IF({ce}{R}="RECHAZADA","Rechazada",'
                 f'IF({ce}{R}="NO COMPARABLE","No comparable",IF({ce}{R}="VALIDADA",{clas_v},"Posiblemente "&{clas}))))',
                 f_centro, v.dictamen_texto(ev))
+            colorear_por_dictamen(wf, f"{cr}{R}:{xl_col_to_name(c0 + 3)}{R}", f"${xl_col_to_name(c0 + 3)}{R}")
             wf.write(r, c0 + 4, v.confiabilidad_fuente(ev), f_centro)
             wf.write(r, c0 + 5, v.falta_confirmar(ev, f.get("Concepto")), f_txt)
     anchos_f = [5, 44, 8, 13] + [12, 15, 10, 20, 13, 34] * len(FUENTES)
@@ -572,7 +617,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "P.U. referencia"] + campos
     we.merge_range(0, 0, 0, len(cab_e) - 1, "Evidencia de cada referencia", f_titulo)
     we.set_row(0, 26)
-    we.write(1, 0, "Documento, código, página, unidad, región, fechas, qué incluye el precio y ajuste por inflación "
+    we.write(1, 0, "TEXTO DE LA CONSULTA ORIGINAL (no se recalcula con fórmulas). "
+                   "Documento, código, página, unidad, región, fechas, qué incluye el precio y ajuste por inflación "
                    "(precio original, índice, periodos, valores y factor). El ajuste por inflación no confirma "
                    "vigencia comercial ni equivalencia técnica.", f_sub)
     for c, texto in enumerate(cab_e):
@@ -683,7 +729,9 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     wm.set_column(1, 1, 100)
     wm.merge_range(0, 0, 0, 1, "Metodología de validación", f_titulo)
     wm.set_row(0, 26)
+    import version as _version
     reglas = [
+        ("Versión de la app", f"{_version.VERSION} ({_version.FECHA}): {_version.DESCRIPCION}."),
         ("RECHAZA (IA)", "La referencia se excluye del precio de negociación, de las diferencias y del semáforo. Queda solo como evidencia."),
         ("NO_SEGURO (IA)", "Se conserva como orientativa (NO CONCLUYENTE): se muestra su precio y su %, pero no decide el semáforo."),
         ("CONFIRMA (IA)", "No basta. VALIDADA exige además: especificaciones de la referencia (sección, espesor, f'c, "

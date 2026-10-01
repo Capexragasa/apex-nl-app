@@ -363,6 +363,61 @@ _INCLUSIONES = (
 _AZOTEA = r"AZOTEA|PLACA|LOSA EXISTENTE|SOBRE LOSA|PRETIL|EN ALTURA|ELEVACION"
 
 
+# Acabados (pintura, estuco, aplanados): el precio depende del soporte, la
+# preparación, el sellador, el espesor y el número de capas.
+_SOPORTES = (
+    ("mampostería", r"\b(block|bloque|tabique|ladrillo|tabicon|mamposteria)\b"),
+    ("concreto", r"\b(concreto|losa|columnas? de concreto|trabes?)\b"),
+    ("tablaroca / panel de yeso", r"tablaroca|tablacemento|durock|panel de yeso|drywall"),
+    ("sobre aplanado", r"sobre aplanado|en aplanado|aplanado fino|superficie aplanada"),
+    ("madera", r"\bmadera\b|triplay"),
+    ("metal", r"\b(metal|metalic[oa]|herreria|lamina|acero)\b"),
+)
+_PREPARACION = (
+    ("sellador / primario", r"sellador|primario|primer|imprimador"),
+    ("preparación de superficie", r"preparacion de (la )?superficie|lijado|limpieza de superficie|resanes?"),
+    ("adherencia (malla / adhesivo)", r"\bmalla\b|adherente|adhesivo|puente de adherencia"),
+    ("repellado / zarpeo", r"repellado|zarpeo|enjarre"),
+)
+_NUM_TEXTO = {"una": "1", "un": "1", "dos": "2", "tres": "3", "cuatro": "4"}
+
+
+def specs_acabado(texto: str) -> dict:
+    t = _plano(texto)
+    manos = {_NUM_TEXTO.get(n, n) for n in re.findall(r"\b(\d|una|un|dos|tres|cuatro)\s*(?:manos?|capas?|aplicaciones)\b", t)}
+    return {
+        "soporte": {n for n, p in _SOPORTES if re.search(p, t)},
+        "manos": manos,
+        "preparacion": {n for n, p in _PREPARACION if re.search(p, t)},
+    }
+
+
+def _comparar_acabado(cotizado: str, referencia: str):
+    """Faltantes y conflictos propios de acabados. Falta de datos -> faltante
+    (orientativa); diferencia confirmada -> conflicto (se excluye)."""
+    c, r = specs_acabado(cotizado), specs_acabado(referencia)
+    faltantes, conflictos = [], []
+    if c["soporte"] and r["soporte"] and not (c["soporte"] & r["soporte"]):
+        conflictos.append(f"soporte: cotizado {', '.join(sorted(c['soporte']))} vs referencia "
+                          f"{', '.join(sorted(r['soporte']))}")
+    elif bool(c["soporte"]) != bool(r["soporte"]):
+        faltantes.append("soporte (" + ("la referencia no lo indica" if c["soporte"] else
+                                        f"referencia sobre {', '.join(sorted(r['soporte']))}") + ")")
+    if c["manos"] and r["manos"] and not (c["manos"] & r["manos"]):
+        conflictos.append(f"capas/manos: cotizado {', '.join(sorted(c['manos']))} vs referencia "
+                          f"{', '.join(sorted(r['manos']))}")
+    elif bool(c["manos"]) != bool(r["manos"]):
+        faltantes.append("número de capas/manos (" + ("la referencia no lo indica" if c["manos"] else
+                                                      f"referencia {', '.join(sorted(r['manos']))}") + ")")
+    for p_ in sorted(r["preparacion"] - c["preparacion"]):
+        faltantes.append(f"{p_} (la referencia lo incluye)")
+    for p_ in sorted(c["preparacion"] - r["preparacion"]):
+        faltantes.append(f"{p_} (la referencia no lo indica)")
+    if extraer_especificaciones(cotizado).get("espesor") and not extraer_especificaciones(referencia).get("espesor"):
+        faltantes.append("espesor (la referencia no lo indica)")
+    return faltantes, conflictos
+
+
 def comparar_especificaciones(cotizado: str, referencia: str):
     """Regresa (faltantes, conflictos): specs de la referencia que el
     proveedor no declaró, y specs declaradas con valor distinto."""
@@ -385,6 +440,10 @@ def comparar_especificaciones(cotizado: str, referencia: str):
             continue
         elif not (valores & cot[campo]):
             conflictos.append(f"{campo}: cotizado {', '.join(sorted(cot[campo]))} vs referencia {', '.join(sorted(valores))}")
+    if trabajo_principal(cotizado) in ("aplanado", "pintura"):
+        f_a, c_a = _comparar_acabado(cotizado, referencia)
+        faltantes += f_a
+        conflictos += c_a
     return faltantes, conflictos
 
 
@@ -780,6 +839,8 @@ def evidencia(ev: dict, concepto: str) -> dict:
         "Fecha / periodo del precio": ev.get("periodo") or ev.get("fecha") or (
             "no indicada" if ev.get("precio_referencia") else ""),
         "Fecha de consulta": ev.get("fecha_consulta") or "",
+        "Estado de la búsqueda": (ev.get("estado_busqueda") or "")
+                                 + (f" (búsqueda reutilizada del {ev['reutilizada']})" if ev.get("reutilizada") else ""),
         "Verificación": verificacion,
         "Precio original": ev.get("precio_original"),
         "Índice de inflación": inf.get("indice", ""),

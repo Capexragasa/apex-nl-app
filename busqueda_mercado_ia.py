@@ -885,7 +885,42 @@ def _buscar_precios_mercado_tavily_lote(items, api_key=None):
     return salida
 
 
-def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key=None):
+# ----------------------------------------------------------------------
+# Reutilización: una búsqueda del mismo concepto (misma descripción, que
+# incluye especificaciones y alcance), misma unidad y misma región no se
+# repite. Se guarda con su fecha; un fallo técnico NO se guarda.
+# ----------------------------------------------------------------------
+_CACHE_BUSQUEDAS = {}
+VIGENCIA_CACHE_DIAS = 30
+ESTADOS_REUTILIZABLES = {"precio localizado", "sin referencia localizada", "sin referencia comparable"}
+
+
+def clave_busqueda(item, region="Nuevo León"):
+    try:
+        from comparador_multifuente_v2 import normalize_text, normalize_unit
+        return (normalize_text(item["descripcion"]), normalize_unit(item["unidad"]), region)
+    except Exception:
+        return (str(item["descripcion"]).casefold().strip(), str(item["unidad"]).casefold().strip(), region)
+
+
+def busqueda_guardada(item, region="Nuevo León"):
+    """(resultado, fecha) si hay una búsqueda vigente reutilizable; si no, None."""
+    import datetime as _dt
+    g = _CACHE_BUSQUEDAS.get(clave_busqueda(item, region))
+    if not g:
+        return None
+    if (_dt.datetime.now() - g["fecha"]).days > VIGENCIA_CACHE_DIAS:
+        return None
+    return g["resultado"], g["fecha"]
+
+
+def guardar_busqueda(item, resultado, region="Nuevo León"):
+    import datetime as _dt
+    if resultado and resultado.get("estado_busqueda") in ESTADOS_REUTILIZABLES:
+        _CACHE_BUSQUEDAS[clave_busqueda(item, region)] = {"resultado": dict(resultado), "fecha": _dt.datetime.now()}
+
+
+def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key=None, deadline=None):
     """
     items: lista de dicts {id, descripcion, unidad}
 
@@ -903,7 +938,12 @@ def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key
     if not items:
         return {}
 
-    salida = _buscar_precios_mercado_gemini_lote(items, api_key=api_key, modelo=modelo)
+    import time
+    salida = {}
+    if deadline is None or deadline - time.monotonic() > 20:
+        salida = _buscar_precios_mercado_gemini_lote(items, api_key=api_key, modelo=modelo)
+    for v_ in salida.values():
+        v_.setdefault("estado_busqueda", "precio localizado" if v_.get("tiene_dato") else "sin referencia localizada")
     pendientes = [it for it in items if not salida.get(str(it["id"]), {}).get("tiene_dato")]
     # Respaldo: investiga cada partida pendiente (Gemini sin cuota, sin
     # clave o sin precio verificable) leyendo el CONTENIDO de las páginas.
@@ -911,6 +951,7 @@ def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key
         import busqueda_web_respaldo
         respaldo = busqueda_web_respaldo.investigar_lote(
             pendientes, tavily_key=_obtener_tavily_key(tavily_api_key), registrar_error=_registrar_error,
+            deadline=deadline,
         )
         for id_, dato in respaldo.items():
             if dato.get("tiene_dato") or id_ not in salida:

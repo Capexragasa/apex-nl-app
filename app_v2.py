@@ -76,7 +76,8 @@ st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
-st.caption("Versión del comparativo: 2026-09-26 · búsqueda por fuente 5")
+import version as _version
+st.caption(f"Versión {_version.VERSION} · actualizada {_version.FECHA}")
 
 
 # ==========================================================
@@ -2113,6 +2114,18 @@ with st.sidebar:
             value=ia_disponible,
             disabled=not ia_disponible,
         )
+        limite_busqueda_s = st.number_input(
+            "Tiempo máximo total de búsqueda en internet (segundos)",
+            min_value=30, max_value=1800, value=240, step=30,
+            help="Límite para toda la revisión, además de 40 s por partida. Al llegar al límite se "
+                 "conservan los resultados obtenidos y el resto queda como «tiempo agotado».",
+        )
+        actualizar_busquedas = st.checkbox(
+            "Actualizar búsquedas de internet (no reutilizar las anteriores)",
+            value=False,
+            help="Por defecto se reutiliza una búsqueda del mismo concepto, unidad y región de los últimos "
+                 "30 días; se muestra su fecha.",
+        )
         st.caption(
             "Filtro 4: Gemini busca el precio con Google. Si se acaba su cuota, "
             "un buscador de respaldo abre las páginas y toma el precio solo del renglón "
@@ -2547,51 +2560,61 @@ if archivo is not None:
                         for indice, registro in enumerate(fila_registros)
                     ]
 
+                    import time as _time
+                    import busqueda_web_respaldo as _bwr
                     resultados_busqueda_mercado = {}
-                    cache_precios_ia = st.session_state.setdefault(
-                        "precios_ia_verificados", {}
-                    )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = ("fuente-verificada-v8", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
-                        if clave in cache_precios_ia:
-                            resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
+                        guardada = None if actualizar_busquedas else busqueda_mercado_ia.busqueda_guardada(item)
+                        if guardada:
+                            res_g, fecha_g = guardada
+                            res_g = dict(res_g)
+                            res_g["reutilizada"] = fecha_g.strftime("%Y-%m-%d %H:%M")
+                            resultados_busqueda_mercado[item["id"]] = res_g
                         else:
                             pendientes.append(item)
 
+                    _t0 = _time.monotonic()
+                    _deadline = _t0 + float(limite_busqueda_s)
                     progreso_busqueda = st.progress(
                         0, text="Preparando búsqueda de precios externos..."
                     )
-
-                    for inicio in range(
-                        0, len(pendientes), busqueda_mercado_ia.TAMANO_LOTE
-                    ):
-                        lote = pendientes[
-                            inicio:inicio + busqueda_mercado_ia.TAMANO_LOTE
-                        ]
-                        respuesta_lote = busqueda_mercado_ia.buscar_precios_mercado_lote(lote)
-                        resultados_busqueda_mercado.update(respuesta_lote)
+                    _total_items = max(len(items_busqueda_mercado), 1)
+                    _hechas = len(items_busqueda_mercado) - len(pendientes)
+                    for inicio in range(0, len(pendientes), busqueda_mercado_ia.TAMANO_LOTE):
+                        lote = pendientes[inicio:inicio + busqueda_mercado_ia.TAMANO_LOTE]
+                        if _time.monotonic() >= _deadline:
+                            # Límite total alcanzado: se conservan los resultados ya
+                            # obtenidos y el resto queda marcado como tiempo agotado.
+                            for item in pendientes[inicio:]:
+                                resultados_busqueda_mercado[item["id"]] = {
+                                    "precio_mxn": None, "tiene_dato": False, "estado_busqueda": "tiempo agotado",
+                                    "nota": (f"Tiempo agotado: se alcanzó el límite total de {limite_busqueda_s} s "
+                                             "de búsqueda en esta revisión antes de buscar esta partida. No indica "
+                                             "que no existan precios publicados; sube el límite en Opciones "
+                                             "avanzadas o vuelve a revisar (se reutiliza lo ya buscado)."),
+                                }
+                            break
+                        respuesta_lote = busqueda_mercado_ia.buscar_precios_mercado_lote(lote, deadline=_deadline)
+                        _err = (busqueda_mercado_ia.ultimo_error() or {}).get("mensaje") or ""
                         for item in lote:
                             respuesta = respuesta_lote.get(item["id"])
-                            # Se reutiliza en la sesión tanto un precio encontrado como un
-                            # "no localizado" (no se repite la búsqueda); un fallo del
-                            # buscador o de cuota sí se vuelve a intentar.
-                            if respuesta and ((respuesta.get("tiene_dato") and respuesta.get("precio_mxn"))
-                                              or "Sin precio comprobable" in str(respuesta.get("nota") or "")
-                                              or "Sin referencia comparable" in str(respuesta.get("nota") or "")):
-                                clave = ("fuente-verificada-v8", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
-                                cache_precios_ia[clave] = respuesta
-
-                        completadas = min(
-                            len(items_busqueda_mercado) - len(pendientes) + inicio + len(lote),
-                            len(items_busqueda_mercado)
-                        )
+                            if not respuesta:
+                                estado_e = _bwr.clasificar_error(_err) if _err else "error de conexión"
+                                respuesta = {
+                                    "precio_mxn": None, "tiene_dato": False, "estado_busqueda": estado_e,
+                                    "nota": (f"{estado_e.capitalize()}: el buscador no respondió para esta partida"
+                                             + (f" ({_err[:160]})" if _err else "")
+                                             + ". Fallo técnico; no indica que no existan precios publicados."),
+                                }
+                            respuesta["fecha_busqueda"] = pd.Timestamp.now(tz="America/Monterrey").strftime("%Y-%m-%d %H:%M")
+                            resultados_busqueda_mercado[item["id"]] = respuesta
+                            busqueda_mercado_ia.guardar_busqueda(item, respuesta)
+                        _hechas += len(lote)
                         progreso_busqueda.progress(
-                            completadas / len(items_busqueda_mercado),
-                            text=(
-                                f"Búsqueda externa: {completadas}/"
-                                f"{len(items_busqueda_mercado)} partidas"
-                            ),
+                            min(_hechas / _total_items, 1.0),
+                            text=(f"Búsqueda externa: {_hechas}/{len(items_busqueda_mercado)} partidas · "
+                                  f"{_time.monotonic() - _t0:.0f} de {limite_busqueda_s} s"),
                         )
 
                     progreso_busqueda.empty()
@@ -3043,7 +3066,9 @@ if archivo is not None:
                             # precio: no se inventa una fecha; se registra
                             # solo la fecha en que se consultó.
                             fecha_dato=(busqueda_ia or {}).get("fecha_fuente"),
-                            fecha_consulta=pd.Timestamp.now(tz="America/Monterrey").strftime("%Y-%m-%d"),
+                            fecha_consulta=((busqueda_ia or {}).get("reutilizada")
+                                            or (busqueda_ia or {}).get("fecha_busqueda")
+                                            or pd.Timestamp.now(tz="America/Monterrey").strftime("%Y-%m-%d %H:%M")),
                             region="WEB",
                             es_web=True,
                             web_verificada=_es_gemini and bool((busqueda_ia or {}).get("verificado")),
@@ -3091,6 +3116,8 @@ if archivo is not None:
                             "url": busqueda_ia.get("fuente_url"), "origen": busqueda_ia.get("origen"),
                             "codigo": busqueda_ia.get("codigo"), "pagina": busqueda_ia.get("pagina"),
                             "rechazadas": busqueda_ia.get("rechazadas") or [],
+                            "estado_busqueda": busqueda_ia.get("estado_busqueda"),
+                            "reutilizada": busqueda_ia.get("reutilizada"),
                             "documento": busqueda_ia.get("fuente_nombre"), "unidad_ref": busqueda_ia.get("unidad_encontrada"),
                             "region": busqueda_ia.get("region") or "México (web)",
                         })
@@ -3303,6 +3330,17 @@ if archivo is not None:
                 def _motivo_corto(ev):
                     m = _html.escape(str(ev.get("motivo") or ""), quote=False)
                     pm = m.lower()
+                    eb = ev.get("estado_busqueda")
+                    if eb:
+                        txt = {"sin referencia localizada": "sin referencia localizada",
+                               "sin referencia comparable": "sin referencia comparable",
+                               "tiempo agotado": "⏱ tiempo agotado (fallo técnico)",
+                               "cuota agotada": "⚠ cuota agotada (fallo técnico)",
+                               "error de conexión": "⚠ error de conexión (fallo técnico)",
+                               "búsqueda incompleta": "búsqueda incompleta"}.get(eb, eb)
+                        if ev.get("reutilizada"):
+                            txt += f" · búsqueda del {ev['reutilizada']}"
+                        return txt
                     if "no conectado" in pm:
                         return "no conectado"
                     if "cuota" in pm or "429" in pm:
@@ -3333,7 +3371,10 @@ if archivo is not None:
                             return ("color:#98a2b3", f'<span title="{motivo}">Sin referencia comparable<br><small>'
                                     f'Rechazada: {e(_r0.get("codigo") or "")} {e(str(_r0.get("concepto"))[:45])}… '
                                     f'(<s>{_dinero(_r0.get("precio"))}</s>)</small></span>')
-                        return ("color:#98a2b3", f'<span title="{motivo}">Sin dato<br><small>{_motivo_corto(ev)}</small></span>')
+                        _tec = ev.get("estado_busqueda") in ("tiempo agotado", "cuota agotada", "error de conexión")
+                        return ("color:#98a2b3" if not _tec else "color:#b54708",
+                                f'<span title="{motivo}">{"Búsqueda no completada" if _tec else "Sin dato"}<br>'
+                                f'<small>{_motivo_corto(ev)}</small></span>')
                     validada = simple == "Validada"
                     fondo, texto = _COLOR_CELDA.get((validada, ev.get("clasificacion")), ("#f2f4f7", "#344054"))
                     icono = {"ALTO": "🔴", "EN MERCADO": "🟡", "BAJO": "🟢"}[ev["clasificacion"]]
@@ -3454,7 +3495,7 @@ if archivo is not None:
 
                 # ---------------- 4. Descarga ----------------
                 configuracion_ia = (
-                    f"Configuración IA: revisión {'SÍ' if usar_ia else 'NO'} · "
+                    f"Versión {_version.VERSION}. Configuración IA: revisión {'SÍ' if usar_ia else 'NO'} · "
                     f"búsqueda de precios {'SÍ' if (busqueda_ia_disponible and buscar_precios_web) else 'NO'} · "
                     f"generado {pd.Timestamp.now(tz='America/Monterrey'):%Y-%m-%d %H:%M}."
                 )
@@ -3524,6 +3565,7 @@ if archivo is not None:
                         "Oportunidad validada (potencial)": fin_["ahorro_potencial"] or 0.0,
                         "Nota": fin_["detalle"] or "",
                         "Configuración": configuracion_ia,
+                        "Versión de la app": _version.VERSION,
                     })
                     registros_csv.append(fila_csv)
 
