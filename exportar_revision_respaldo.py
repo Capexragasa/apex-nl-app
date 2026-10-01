@@ -85,7 +85,7 @@ def _semaforo_cf(ws, rango):
         )
 
 
-def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") -> bytes:  # respaldo openpyxl
+def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "", **_ignorados) -> bytes:  # respaldo openpyxl
     """filas: los dicts de la app (con '_evaluaciones' y '_final')."""
     wb = Workbook()
 
@@ -153,7 +153,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") ->
     ws = wb.create_sheet("Resumen", 0)
     cab = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado",
            "Semáforo final", "Fuentes validadas", "Referencia para negociar",
-           "P.U. de negociación", "% vs negociación", "Ahorro potencial", "Nota"]
+           "P.U. de referencia", "% vs referencia", "Diferencia contra referencia", "Nota"]
     _titulo(ws, "Revisión de cotización CAPEX",
             f"Proveedor: {proveedor or '—'} · Proyecto: {proyecto or '—'} · "
             f"Generado {_dt.date.today():%d/%m/%Y}. Azul = dato capturado; negro = fórmula.",
@@ -189,7 +189,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") ->
     _celda(ws, rt, 2, "TOTAL", negrita=True)
     _celda(ws, rt, 6, f"=SUM(F5:F{ultima})", MONEDA, negrita=True)
     _celda(ws, rt, 12, f"=SUM(L5:L{ultima})", MONEDA, negrita=True)
-    _celda(ws, rt + 1, 2, "Ahorro potencial sobre el importe", negrita=True)
+    _celda(ws, rt + 1, 2, "Diferencia sobre el importe", negrita=True)
     _celda(ws, rt + 1, 12, f'=IF(F{rt}=0,"",L{rt}/F{rt})', "0.0%", negrita=True)
     _semaforo_cf(ws, f"G5:G{max(ultima, 5)}")
     for col, ancho in {1: 5, 2: 46, 3: 8, 4: 10, 5: 13, 6: 15, 7: 23, 8: 22,
@@ -247,7 +247,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "") ->
         ("RECHAZA (IA)", "La referencia se excluye del precio de negociación, de las diferencias y del semáforo. Queda solo como evidencia."),
         ("NO_SEGURO (IA)", "Se conserva como orientativa (NO CONCLUYENTE): se muestra su precio y su %, pero no decide el semáforo."),
         ("CONFIRMA (IA)", "Además se verifica unidad (misma unidad), alcance (suministro vs. instalación), antigüedad del dato (máx. "
-                          f"{v.ANTIGUEDAD_MAXIMA_ANIOS} años) y escala del precio (dentro de {v.FACTOR_ESCALA:.0f}× del cotizado)."),
+                          f"{v.VIGENCIA_MESES} meses de vigencia) y escala del precio (dentro de {v.FACTOR_ESCALA:.0f}× del cotizado)."),
         ("Coincidencia débil", "Si la coincidencia de texto es BAJA y la IA no la confirmó: POR CONFIRMAR (orientativa)."),
         ("Precio web", "Debe aparecer en la misma frase que el concepto y la unidad. Un fragmento web sin validar es orientativo; "
                        "solo un precio de Gemini con fuente y frase verificadas puede quedar VALIDADO."),
