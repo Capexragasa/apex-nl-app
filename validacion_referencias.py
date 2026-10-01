@@ -96,12 +96,43 @@ _METAL = re.compile(r"\b(metalic[oa]s?|acero estructural|placa de acero|perfil(e
 _MAMPOSTERIA = re.compile(r"\b(barda|block|bloque|tabique|concreto|castillos?|armex|mamposteria|dala|cerramiento)\b")
 
 
+# Elementos estructurales: un castillo no es un cerramiento aunque ambos
+# lleven Armex y concreto. Se compara el elemento PRINCIPAL (el primero que
+# se menciona) de la partida contra el de la referencia.
+_ELEMENTOS = (
+    ("cerramiento", r"\b(cerramientos?|dalas?|cadenas?)\b"),
+    ("castillo", r"\b(castillos?|columnas? (para amarrar|de amarre|de barda|de confinamiento))\b"),
+    ("columna", r"\bcolumnas?\b"),
+    ("trabe", r"\btrabes?\b"),
+    ("zapata", r"\bzapatas?\b"),
+    ("losa", r"\blosas?\b"),
+    ("firme", r"\bfirmes?\b"),
+    ("muro", r"\b(muros?|bardas?|pretil)\b"),
+)
+
+
+def elemento_principal(texto: str):
+    t = _plano(texto)
+    encontrados = []
+    for nombre, patron in _ELEMENTOS:
+        m = re.search(patron, t)
+        if m:
+            encontrados.append((m.start(), nombre))
+    if not encontrados:
+        return None
+    nombre = min(encontrados)[1]
+    return "castillo" if nombre == "columna" and re.search(_ELEMENTOS[1][1], t) else nombre
+
+
 def alcance_distinto(cotizado: str, referencia: str):
     """Regresa el motivo si el alcance o material de la referencia no es comparable."""
     original = _plano(cotizado)
     candidato = _plano(referencia)
     if not original or not candidato:
         return None
+    e_cot, e_ref = elemento_principal(original), elemento_principal(candidato)
+    if e_cot and e_ref and e_cot != e_ref and {e_cot, e_ref} != {"castillo", "columna"}:
+        return f"elemento distinto: la partida es {e_cot} y la referencia es {e_ref}"
     # Material distinto: p. ej. "columnas para amarrar barda" (concreto)
     # contra "bases para columnas metálicas" (acero). No requiere IA.
     if _METAL.search(candidato) and not _METAL.search(original) and _MAMPOSTERIA.search(original):
@@ -156,12 +187,29 @@ def extraer_especificaciones(texto: str) -> dict:
     return specs
 
 
+# Inclusiones que cambian el precio: si la referencia las trae y el
+# proveedor no las menciona, la equivalencia no está demostrada.
+_INCLUSIONES = (
+    ("refuerzo horizontal", r"REFUERZO HORIZONTAL|ESCALERILLA|ESCALERA DE ACERO"),
+    ("castillos ahogados", r"CASTILLOS? AHOGADOS?"),
+    ("acabado aparente", r"ACABADO APARENTE|APARENTE"),
+    ("cimbra", r"\bCIMBRA\b"),
+)
+_AZOTEA = r"AZOTEA|PLACA|LOSA EXISTENTE|SOBRE LOSA|PRETIL|EN ALTURA|ELEVACION"
+
+
 def comparar_especificaciones(cotizado: str, referencia: str):
     """Regresa (faltantes, conflictos): specs de la referencia que el
     proveedor no declaró, y specs declaradas con valor distinto."""
     ref = extraer_especificaciones(referencia)
     cot = extraer_especificaciones(cotizado)
     faltantes, conflictos = [], []
+    t_ref, t_cot = _texto_especificaciones(referencia), _texto_especificaciones(cotizado)
+    for nombre, patron in _INCLUSIONES:
+        if re.search(patron, t_ref) and not re.search(patron, t_cot):
+            faltantes.append(nombre)
+    if re.search(_AZOTEA, t_cot) and not re.search(_AZOTEA + r"|ALTURA|ELEVACIONES|ACARREO", t_ref):
+        faltantes.append("condición de azotea/losa (la referencia no la contempla)")
     dims_cot = {p for d in cot.get("sección / medidas", set()) for p in d.split("X")}
     for campo, valores in ref.items():
         if campo == "espesor" and dims_cot and any(v.replace(" CM", "") in dims_cot for v in valores):
@@ -198,6 +246,7 @@ def evaluar_fuente(
     es_web: bool = False,
     web_verificada: bool = False,
     anio_dato=None,
+    fecha_consulta=None,
 ) -> dict:
     """Decide el estado de UNA referencia y calcula su comparación.
 
@@ -217,6 +266,7 @@ def evaluar_fuente(
         "descripcion": None,
         "precio_referencia": None,
         "fecha": str(fecha_dato)[:10] if fecha_dato else None,
+        "fecha_consulta": str(fecha_consulta)[:10] if fecha_consulta else None,
         "region": region,
         "estado": SIN_DATO,
         "motivo": "la fuente no encontró un concepto comparable",

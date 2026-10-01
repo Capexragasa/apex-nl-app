@@ -40,7 +40,8 @@ MODELO_POR_DEFECTO = "gemini-3.5-flash"
 # se prueba el siguiente en vez de dejar la 4a fuente vacia. Se puede
 # forzar uno con 'gemini_model' en Secrets.
 MODELOS_RESPALDO = (
-    "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+    "gemini-3.5-flash-lite", "gemini-2.5-flash",
 )
 _modelo_que_funciono = {"nombre": None}
 
@@ -246,10 +247,56 @@ def _referencia_equivalente(item, descripcion_fuente, unidad_fuente):
 
 
 def _modelos_a_probar(modelo=None):
-    preferido = modelo or _leer_secret("gemini_model") or _modelo_que_funciono["nombre"]
-    orden = [preferido] if preferido else []
-    orden += [m for m in MODELOS_RESPALDO if m not in orden]
+    """Orden de modelos: el forzado en Secrets ('gemini_model'), el que ya
+    funcionó en esta sesión, el MISMO que usa la revisión con IA (si la
+    revisión funciona, ese modelo existe para esta clave) y los de respaldo."""
+    orden = []
+    for candidato in (
+        modelo,
+        _leer_secret("gemini_model"),
+        _modelo_que_funciono["nombre"],
+        _modelo_de_revision(),
+        *MODELOS_RESPALDO,
+    ):
+        if candidato and candidato not in orden:
+            orden.append(candidato)
     return orden
+
+
+def _modelo_de_revision():
+    try:
+        import revision_ia
+        return getattr(revision_ia, "MODELO_GEMINI_POR_DEFECTO", None)
+    except Exception:
+        return None
+
+
+def _modelos_disponibles_en_la_clave(cliente, ya_probados):
+    """Pregunta a Google qué modelos tiene ESTA clave y regresa los Flash
+    que generan contenido y no se han probado, del más nuevo al más viejo."""
+    nombres = []
+    try:
+        for m in cliente.models.list():
+            nombre = str(getattr(m, "name", "") or "").replace("models/", "")
+            acciones = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+            if "gemini" not in nombre or "flash" not in nombre:
+                continue
+            if acciones and "generateContent" not in acciones:
+                continue
+            if any(x in nombre for x in ("image", "tts", "audio", "live", "embedding", "thinking-exp")):
+                continue
+            if nombre not in ya_probados:
+                nombres.append(nombre)
+    except Exception as error:
+        _registrar_error(f"Gemini: no se pudo listar los modelos de la clave ({error})")
+        return []
+
+    def _version(nombre):
+        numeros = re.findall(r"\d+(?:\.\d+)?", nombre)
+        return float(numeros[0]) if numeros else 0.0
+
+    # Primero versiones estables (sin "preview"/"exp"), luego las más nuevas.
+    return sorted(nombres, key=lambda n: (("preview" in n) or ("exp" in n), -_version(n), "lite" in n))[:5]
 
 
 def _es_error_de_modelo(error):
@@ -321,20 +368,48 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
     )
 
     respuesta = None
-    for nombre_modelo in _modelos_a_probar(modelo):
+    intentos = []
+    probados = []
+
+    def _intentar(nombre_modelo):
+        probados.append(nombre_modelo)
         try:
-            respuesta = cliente.models.generate_content(
+            r = cliente.models.generate_content(
                 model=nombre_modelo,
                 contents=prompt,
                 config={"tools": [{"google_search": {}}], "temperature": 0.1},
             )
             _modelo_que_funciono["nombre"] = nombre_modelo
-            break
+            return r, None
         except Exception as error:
-            _registrar_error(f"Gemini ({nombre_modelo}): {error}")
-            if not _es_error_de_modelo(error):
-                return {}
+            intentos.append(f"{nombre_modelo}: {str(error)[:160]}")
+            return None, error
+
+    pendientes_modelos = list(_modelos_a_probar(modelo))
+    while pendientes_modelos:
+        nombre_modelo = pendientes_modelos.pop(0)
+        if nombre_modelo in probados:
+            continue
+        respuesta, error = _intentar(nombre_modelo)
+        if respuesta is not None:
+            break
+        if not _es_error_de_modelo(error):
+            break
+        # Google suele decir qué modelo usar ("Please update your code to
+        # use models/gemini-3.8-flash"): se prueba ese a continuación.
+        sugerido = re.search(r"use models/([\w.\-]+)", str(error))
+        if sugerido and sugerido.group(1) not in probados:
+            pendientes_modelos.insert(0, sugerido.group(1))
+    else:
+        # Ninguno de la lista existe para esta clave: preguntarle a Google
+        # cuáles sí tiene y probar esos.
+        for nombre_modelo in _modelos_disponibles_en_la_clave(cliente, probados):
+            respuesta, error = _intentar(nombre_modelo)
+            if respuesta is not None or not _es_error_de_modelo(error):
+                break
+
     if respuesta is None:
+        _registrar_error("Gemini: ningún modelo respondió a la búsqueda. Intentos -> " + " | ".join(intentos))
         return {}
 
     texto = getattr(respuesta, "text", None)
