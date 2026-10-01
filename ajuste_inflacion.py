@@ -274,8 +274,10 @@ def detalle_ajuste(periodo, fecha_min=None, fecha_max=None) -> dict:
         "valor_final": NIVEL_ACTUAL,
         "factor": round(NIVEL_ACTUAL / valor, 4),
         "justificacion": (
-            (f"Los registros van de {rango}; la mediana mezcla varios meses, así que se toma el mes "
-             f"intermedio del periodo ({etiqueta}) como base. " if rango else "")
+            ((f"Los registros van de {rango}; la mediana mezcla varios meses, así que se toma el mes "
+              f"intermedio del periodo ({etiqueta}) como base. "
+              if str(fecha_min)[:7] != str(fecha_max)[:7] else
+              f"Todos los registros son de {etiqueta}; ese mes es la base. ") if rango else "")
             + f"Valor base: {metodo}."
         ),
     }

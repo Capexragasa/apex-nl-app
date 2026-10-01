@@ -156,6 +156,15 @@ def alcance_distinto(cotizado: str, referencia: str):
         return f"elemento distinto: la partida es {e_cot} y la referencia es {e_ref}"
     if e_cot in ("castillo", "cerramiento", "columna") and not e_ref:
         return f"la referencia no es un {e_cot} (otro elemento)"
+    if e_cot in ("castillo", "cerramiento", "columna"):
+        # El elemento debe ser el OBJETO principal de la referencia, no algo
+        # mencionado de paso ("consola modular, anclaje a columna...").
+        objeto = re.sub(r"^\W*(\d[\d.\-]*\s+)?((suministro|colocacion|instalacion|fabricacion|construccion|"
+                        r"elaboracion|habilitado|armado)\s*(,|y|e|de|del)?\s*)+", "", candidato)
+        cabeza = " ".join(objeto.split()[:4])
+        patron = dict(_ELEMENTOS)[e_cot] if e_cot != "castillo" else r"\b(castillos?|columnas?)\b"
+        if not re.search(patron, cabeza):
+            return f"el objeto principal de la referencia no es un {e_cot} ({' '.join(objeto.split()[:3])}…)"
     t_cot, t_ref = trabajo_principal(original), trabajo_principal(candidato)
     if t_cot and t_ref and t_cot != t_ref:
         return f"trabajo distinto: la partida es {t_cot} y la referencia es {t_ref}"
