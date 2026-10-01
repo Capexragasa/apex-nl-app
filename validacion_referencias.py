@@ -145,6 +145,47 @@ def trabajo_principal(texto: str):
     return min(encontrados)[1] if encontrados else None
 
 
+_VERBOS_OBRA = (r"suministro|colocacion|instalacion|aplicacion|fabricacion|construccion|elaboracion|"
+                r"habilitado|armado|servicio|trabajos?|ejecucion|realizacion|renta|mano de obra|"
+                r"suministrar|colocar|instalar|aplicar|fabricar|construir|elaborar")
+_RELLENO = {"de", "del", "la", "el", "los", "las", "y", "e", "en", "para", "con", "por", "a", "al", "un", "una"}
+# Formas de nombrar el mismo objeto (raíz -> sinónimos aceptados en la referencia).
+_GRUPOS_OBJETO = {
+    "columna": {"castillo", "columna"},
+    "castillo": {"castillo", "columna"},
+    "cerramiento": {"cerramiento", "dala", "cadena"},
+    "dala": {"cerramiento", "dala", "cadena"},
+    "cadena": {"cerramiento", "dala", "cadena"},
+    "muro": {"muro", "barda", "pretil"},
+    "barda": {"muro", "barda", "pretil"},
+    "estuco": {"estuco"},
+    "aplanado": {"aplanado", "repellado", "enjarre", "estuco", "zarpeo"},
+    "grua": {"grua"},
+}
+
+
+def _cabeza(texto: str, n: int) -> str:
+    """Primeras n palabras del objeto, sin códigos ni verbos de obra."""
+    t = _plano(texto)
+    t = re.sub(r"^[\W\d.\-]*", "", t)
+    t = re.sub(rf"^((({_VERBOS_OBRA})\b[\s,]*)|(\b(y|e|de|del|o)\b\s*))+", "", t)
+    palabras = [p for p in re.findall(r"[a-z0-9']+", t)]
+    return " ".join(palabras[:n])
+
+
+def clave_objeto(texto: str):
+    """Sustantivo principal de lo que se cotiza (raíz en singular)."""
+    for p in _cabeza(texto, 6).split():
+        if p in _RELLENO or len(p) < 4 or p.isdigit():
+            continue
+        raiz = re.sub(r"(es|s)$", "", p) if p not in ("trabes",) else "trabe"
+        for k in _GRUPOS_OBJETO:
+            if raiz == k or p == k:
+                return k
+        return raiz
+    return None
+
+
 def alcance_distinto(cotizado: str, referencia: str):
     """Regresa el motivo si el alcance o material de la referencia no es comparable."""
     original = _plano(cotizado)
@@ -156,15 +197,18 @@ def alcance_distinto(cotizado: str, referencia: str):
         return f"elemento distinto: la partida es {e_cot} y la referencia es {e_ref}"
     if e_cot in ("castillo", "cerramiento", "columna") and not e_ref:
         return f"la referencia no es un {e_cot} (otro elemento)"
-    if e_cot in ("castillo", "cerramiento", "columna"):
-        # El elemento debe ser el OBJETO principal de la referencia, no algo
-        # mencionado de paso ("consola modular, anclaje a columna...").
-        objeto = re.sub(r"^\W*(\d[\d.\-]*\s+)?((suministro|colocacion|instalacion|fabricacion|construccion|"
-                        r"elaboracion|habilitado|armado)\s*(,|y|e|de|del)?\s*)+", "", candidato)
-        cabeza = " ".join(objeto.split()[:4])
-        patron = dict(_ELEMENTOS)[e_cot] if e_cot != "castillo" else r"\b(castillos?|columnas?)\b"
-        if not re.search(patron, cabeza):
-            return f"el objeto principal de la referencia no es un {e_cot} ({' '.join(objeto.split()[:3])}…)"
+    # Qué se suministra o ejecuta: el OBJETO principal de la referencia debe
+    # ser el mismo de la partida, no una palabra mencionada de paso
+    # ("cónsula modular, anclaje a columna" no es una columna).
+    clave = clave_objeto(original)
+    if clave:
+        sinonimos = _GRUPOS_OBJETO.get(clave, {clave})
+        # Las dos primeras palabras con significado: el objeto, no un
+        # complemento ("cónsula modular, anclaje a columna").
+        cabeza = " ".join([w for w in _cabeza(candidato, 8).split() if w not in _RELLENO][:2])
+        if not any(re.search(rf"\b{re.escape(x)}(e?s)?\b", cabeza) for x in sinonimos):
+            return (f"lo que se suministra o ejecuta es otro: la partida es «{clave}» y la referencia es "
+                    f"«{' '.join(_cabeza(candidato, 3).split())}…»")
     t_cot, t_ref = trabajo_principal(original), trabajo_principal(candidato)
     if t_cot and t_ref and t_cot != t_ref:
         return f"trabajo distinto: la partida es {t_cot} y la referencia es {t_ref}"
@@ -567,9 +611,10 @@ def alcance_precio(ev: dict) -> str:
     if inc:
         partes.append("incluye " + inc.group(1).strip())
     base = {
-        "nl": ("precio unitario de licitación de obra pública de NL (la publicación OCDS de SIASI los reporta como "
-               "precios contratados; el contrato individual no se revisó); P.U. de obra pública: costo directo + "
-               "indirectos + utilidad, IVA aparte"),
+        "nl": (("precio de contratos adjudicados de obra pública de NL (registros OCDS marcados "
+                "'contrato_adjudicado')" if "contrato_adjudicado" in str(ev.get("tipo_registros") or "")
+                else "precio unitario de licitación de obra pública de NL (tipo de precio no documentado)")
+               + "; P.U. de obra pública: costo directo + indirectos + utilidad, IVA aparte"),
         "cdmx": "precio unitario del tabulador oficial (costo directo + indirectos + utilidad), IVA aparte",
         "historico": "precio cotizado a Ragasa (cotización recibida), sin IVA",
         "ia": "precio publicado en la página, llevado a sin IVA; alcance no confirmado",
@@ -650,6 +695,13 @@ def evidencia(ev: dict, concepto: str) -> dict:
         "Justificación del periodo base": inf.get("justificacion", ""),
         "Nota de inflación": ("el ajuste por inflación no confirma vigencia comercial ni equivalencia técnica"
                               if inf else ""),
+        "Registros de origen": "; ".join(
+            f"{r.get('fecha')} · {r.get('licitacion') or ''} · {r.get('dependencia') or ''} · ${r.get('precio'):,.2f}"
+            for r in (ev.get("registros_detalle") or [])[:5]),
+        "Referencias rechazadas": "; ".join(
+            f"{r.get('codigo') or ''} {str(r.get('concepto'))[:80]} (${r.get('precio') or 0:,.2f}"
+            f"{', pág. ' + str(r.get('pagina')) if r.get('pagina') else ''}) — {r.get('motivo')}"
+            for r in (ev.get("rechazadas") or [])[:5]),
         "Revisión IA": ev.get("revision_ia") or "",
         "Evidencia (frase)": ev.get("evidencia") or "",
     }

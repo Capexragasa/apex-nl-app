@@ -299,7 +299,7 @@ def _candidatos(lineas):
 
 
 def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cotizado=None,
-                        url: str = "", titulo: str = "", origen: str = "página") -> list[dict]:
+                        url: str = "", titulo: str = "", origen: str = "página", rechazadas=None) -> list[dict]:
     """Referencias (concepto, unidad, precio) encontradas en el texto."""
     from rapidfuzz import fuzz
     from validacion_referencias import (alcance_distinto, comparar_especificaciones, elemento_principal,
@@ -309,9 +309,12 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
         return []
     u = _unidad_canonica(unidad)
     patron_u = re.compile(_UNIDAD_PATRON.get(u, re.escape(_plano(unidad) or "-")), re.I)
-    consultas = [_plano(c) for c in opciones_catalogo(descripcion)] or [_plano(descripcion)]
+    consultas = [_plano(c) for c in opciones_catalogo(descripcion)] + [_plano(descripcion)]
     elemento = elemento_principal(descripcion)
     trabajo = trabajo_principal(descripcion)
+    from validacion_referencias import _GRUPOS_OBJETO, clave_objeto
+    _clave = clave_objeto(descripcion)
+    sinonimos_objeto = _GRUPOS_OBJETO.get(_clave, {_clave}) if _clave else set()
 
     muestra = _plano(texto[:30000] + " " + url)
     region = ("Nuevo León" if re.search(r"nuevo leon|monterrey|\.nl\.gob|nl\.gob", muestra) else
@@ -334,7 +337,15 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
             continue
         if trabajo and trabajo_principal(contexto) != trabajo:
             continue
-        if alcance_distinto(descripcion, contexto):
+        motivo_rechazo = alcance_distinto(descripcion, contexto)
+        if motivo_rechazo:
+            # Concepto parecido en palabras pero con otro objeto/material:
+            # se registra como RECHAZADO (evidencia) y se sigue buscando.
+            menciona = any(re.search(rf"\b{x}", ctx) for x in sinonimos_objeto)
+            if rechazadas is not None and patron_u.search(ctx) and (menciona or
+                    max((fuzz.token_set_ratio(c, ctx) for c in consultas), default=0) >= UMBRAL_TEXTO):
+                rechazadas.append({"codigo": _codigo(contexto), "concepto": _limpiar_concepto(contexto)[:160],
+                                   "precio": precios[0], "motivo": motivo_rechazo, "url": url, "pagina": pagina})
             continue
         # Especificación distinta (otra sección, f'c, calibre) o precio por
         # pieza de un tamaño que la partida no declara: se busca otra fuente.
@@ -409,7 +420,7 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
     inicio = time.monotonic()
     descripcion, unidad = item["descripcion"], item["unidad"]
     precio_cot = item.get("precio")
-    referencias, consultas_hechas, paginas_leidas, errores = [], [], 0, []
+    referencias, consultas_hechas, paginas_leidas, errores, rechazadas = [], [], 0, [], []
     vistas = set()
 
     for consulta in consultas_para(descripcion, unidad):
@@ -430,7 +441,8 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
             if not texto and time.monotonic() - inicio < tiempo_max:
                 texto = leer(r["url"])
             refs = extraer_referencias(texto, descripcion=descripcion, unidad=unidad,
-                                       precio_cotizado=precio_cot, url=r["url"], titulo=r.get("titulo", ""))
+                                       precio_cotizado=precio_cot, url=r["url"], titulo=r.get("titulo", ""),
+                                       rechazadas=rechazadas)
             if not refs:
                 # Sin contenido legible: el fragmento del buscador queda
                 # como último recurso, con confiabilidad BAJA.
@@ -457,9 +469,13 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
             "unidad_encontrada": "", "fuente_nombre": "", "fuente_url": "",
             "descripcion_encontrada": "",
             "nota": (f"No se pudo consultar el buscador de respaldo ({errores[0]})." if errores and not paginas_leidas
-                     else f"Sin precio comprobable: se revisaron {paginas_leidas} página(s) con "
-                     f"{len(consultas_hechas)} búsqueda(s) y ningún renglón tenía el mismo material, "
-                     "trabajo y unidad."),
+                     else ("Sin referencia comparable: " if rechazadas else "Sin precio comprobable: ")
+                     + f"se revisaron {paginas_leidas} página(s) con {len(consultas_hechas)} búsqueda(s)"
+                     + (f"; se rechazaron {len(rechazadas)} concepto(s) parecido(s) en palabras pero distinto(s): "
+                        + " | ".join(f"{r['codigo'] or ''} {r['concepto'][:70]} (${r['precio']:,.2f}) — {r['motivo']}"
+                                     for r in rechazadas[:3])
+                        if rechazadas else "; ningún renglón tenía el mismo material, trabajo y unidad.")),
+            "rechazadas": rechazadas[:5],
             "consultas": consultas_hechas, "paginas_revisadas": paginas_leidas,
         }
 
@@ -494,6 +510,7 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
             {"precio": r["precio"], "fuente": r["titulo"] or r["url"], "url": r["url"],
              "confiabilidad": r["confiabilidad"]} for r in otras
         ],
+        "rechazadas": rechazadas[:5],
         "consultas": consultas_hechas,
         "paginas_revisadas": paginas_leidas,
     }

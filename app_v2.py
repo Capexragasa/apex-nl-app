@@ -126,6 +126,60 @@ def cargar_historico():
 FECHA_TABULADOR_CDMX = "2026-05"
 
 comparador = cargar_comparador()
+
+
+def _inflacion_nl(nl: dict) -> dict:
+    """Detalle reproducible del ajuste por inflación de la referencia NL."""
+    usados = nl.get("registros_usados") or 0
+    metodo = str(nl.get("metodo_inflacion") or "")
+    regs = nl.get("registros_detalle") or []
+    mensual = bool(ajuste_inflacion._SERIE_MENSUAL)
+    fuente_indice = "serie mensual publicada por INEGI" if mensual else "sin serie mensual: estimado entre diciembres"
+    if metodo.startswith("mes del renglón") and regs:
+        d = ajuste_inflacion.detalle_ajuste(nl.get("periodo_base_inflacion"))
+        r0 = regs[0]
+        d["justificacion"] = (
+            f"La mediana del grupo (${nl.get('precio_mediana'):,.2f}) es el precio del contrato "
+            f"{r0.get('licitacion') or ''} ({r0.get('dependencia') or ''}) del {r0.get('fecha')}; se actualizó con "
+            f"el INPC de ese mes ({fuente_indice}). p25 y p75 con el mes de su propio renglón cuando se localiza.")
+        return d
+    if metodo.startswith("mediana = promedio") and regs:
+        original = nl.get("precio_mediana") or 0
+        ajustada = nl.get("precio_mediana_ajustada") or 0
+        return {
+            "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
+            "periodo_base": " y ".join(sorted({str(r.get('fecha'))[:7] for r in regs})),
+            "valor_base": None,
+            "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
+            "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
+            "factor": round(ajustada / original, 4) if original else None,
+            "justificacion": (
+                "La mediana es el promedio de dos contratos: " + "; ".join(
+                    f"{r.get('licitacion') or ''} del {r.get('fecha')} (${r.get('precio'):,.2f})" for r in regs)
+                + f". Cada uno se actualizó con el INPC de su mes ({fuente_indice}) y se promedió; factor efectivo."),
+        }
+    if usados and metodo.startswith("cada uno"):
+        mensual = bool(ajuste_inflacion._SERIE_MENSUAL)
+        original = nl.get("precio_mediana") or 0
+        ajustada = nl.get("precio_mediana_ajustada") or 0
+        return {
+            "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
+            "periodo_base": f"mes de cada renglón ({str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]})",
+            "valor_base": None,
+            "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
+            "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
+            "factor": round(ajustada / original, 4) if original else None,
+            "justificacion": (
+                f"Cada uno de los {usados} renglones se actualizó con el INPC de su propio mes "
+                + f"({fuente_indice})"
+                + " y después se calculó la mediana; el factor mostrado es el efectivo (mediana actualizada ÷ "
+                  "mediana original)."
+            ),
+        }
+    d = ajuste_inflacion.detalle_ajuste(
+        nl.get("periodo_base_inflacion") or nl.get("anio_dato_mas_reciente"), nl.get("fecha_min"), nl.get("fecha_max"))
+    d["justificacion"] = "APROXIMACIÓN (no se localizó el renglón de la mediana): " + d["justificacion"]
+    return d
 historico = cargar_historico()
 
 # Revisa una sola vez si hay una API key de IA configurada -- acepta
@@ -2488,7 +2542,7 @@ if archivo is not None:
                     )
                     pendientes = []
                     for item in items_busqueda_mercado:
-                        clave = ("fuente-verificada-v7", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                        clave = ("fuente-verificada-v8", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                         if clave in cache_precios_ia:
                             resultados_busqueda_mercado[item["id"]] = cache_precios_ia[clave]
                         else:
@@ -2512,8 +2566,9 @@ if archivo is not None:
                             # "no localizado" (no se repite la búsqueda); un fallo del
                             # buscador o de cuota sí se vuelve a intentar.
                             if respuesta and ((respuesta.get("tiene_dato") and respuesta.get("precio_mxn"))
-                                              or "Sin precio comprobable" in str(respuesta.get("nota") or "")):
-                                clave = ("fuente-verificada-v7", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
+                                              or "Sin precio comprobable" in str(respuesta.get("nota") or "")
+                                              or "Sin referencia comparable" in str(respuesta.get("nota") or "")):
+                                clave = ("fuente-verificada-v8", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                                 cache_precios_ia[clave] = respuesta
 
                         completadas = min(
@@ -3007,9 +3062,9 @@ if archivo is not None:
                         "registros": nl.get("n_registros"),
                         "periodo": (f"{str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]}"
                                     if nl.get("fecha_min") else None),
-                        "inflacion": (ajuste_inflacion.detalle_ajuste(
-                            nl.get("periodo_base_inflacion") or _anio_nl, nl.get("fecha_min"), nl.get("fecha_max"))
-                            if (_anio_nl and ajustar_inflacion) else None),
+                        "inflacion": (_inflacion_nl(nl) if (_anio_nl and ajustar_inflacion) else None),
+                        "tipo_registros": nl.get("tipo_registros"),
+                        "registros_detalle": nl.get("registros_detalle"),
                     })
                     evaluaciones["cdmx"].update({
                         "documento": ("Tabulador General de Precios Unitarios del Gobierno de la CDMX, edición 2026 "
@@ -3022,6 +3077,7 @@ if archivo is not None:
                         evaluaciones["ia"].update({
                             "url": busqueda_ia.get("fuente_url"), "origen": busqueda_ia.get("origen"),
                             "codigo": busqueda_ia.get("codigo"), "pagina": busqueda_ia.get("pagina"),
+                            "rechazadas": busqueda_ia.get("rechazadas") or [],
                             "documento": busqueda_ia.get("fuente_nombre"), "unidad_ref": busqueda_ia.get("unidad_encontrada"),
                             "region": busqueda_ia.get("region") or "México (web)",
                         })
@@ -3240,6 +3296,8 @@ if archivo is not None:
                         return "sin cuota de la IA"
                     if "no se pudo consultar" in pm or "error" in pm:
                         return "falló el buscador"
+                    if "sin referencia comparable" in pm:
+                        return "sin referencia comparable (se rechazaron conceptos distintos)"
                     if "conectado, sin coincidencias" in pm:
                         return "conectado, sin coincidencias"
                     if "desactivada" in pm:
@@ -3256,6 +3314,12 @@ if archivo is not None:
                         return ("color:#98a2b3", f'<span title="{motivo}">{precio_txt}{simple}<br>'
                                                  f'<small>{motivo[:90]}</small></span>')
                     if simple == "Sin dato":
+                        _rech = ev.get("rechazadas") or []
+                        if _rech:
+                            _r0 = _rech[0]
+                            return ("color:#98a2b3", f'<span title="{motivo}">Sin referencia comparable<br><small>'
+                                    f'Rechazada: {e(_r0.get("codigo") or "")} {e(str(_r0.get("concepto"))[:45])}… '
+                                    f'(<s>{_dinero(_r0.get("precio"))}</s>)</small></span>')
                         return ("color:#98a2b3", f'<span title="{motivo}">Sin dato<br><small>{_motivo_corto(ev)}</small></span>')
                     validada = simple == "Validada"
                     fondo, texto = _COLOR_CELDA.get((validada, ev.get("clasificacion")), ("#f2f4f7", "#344054"))

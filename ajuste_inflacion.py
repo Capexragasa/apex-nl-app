@@ -229,6 +229,10 @@ def indice_base(periodo):
             return (round(a0 + (a1 - a0) * mes / 12, 3), f"{_MESES[f'{mes:02d}']} {anio}",
                     "estimado interpolando entre diciembre y diciembre (sin serie mensual)")
     a_usado = min(max(anio, disponibles[0]), disponibles[-1])
+    if mes:
+        return (INPC_NIVEL_DICIEMBRE[a_usado], f"diciembre {a_usado}",
+                f"APROXIMACIÓN: no hay INPC de {_MESES[f'{mes:02d}']} {anio} disponible (falta la serie mensual "
+                f"de INEGI); se usó diciembre {a_usado}")
     return INPC_NIVEL_DICIEMBRE[a_usado], f"diciembre {a_usado}", "INPC de diciembre del año del dato"
 
 

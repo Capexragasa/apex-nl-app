@@ -857,9 +857,184 @@ class ComparadorMultiFuente:
             for u, df in self.cdmx.groupby('unidad_norm')
         }
 
+        # Renglones crudos de NL (fecha, licitación, OCID) para actualizar cada
+        # precio con el INPC de SU mes y dar evidencia por contrato. Se cargan
+        # al primer uso.
+        self._excel_path = excel_path
+        self._nl_crudo = None
+        self._nl_crudo_pools = {}
+
         # Fuentes pendientes de datos reales del usuario:
         self.ragasa = None
         self.competidores = None
+
+    def registros_nl(self, row) -> pd.DataFrame:
+        """Renglones crudos (contratos adjudicados) que forman el concepto
+        homologado `row`: misma unidad, fechas dentro del periodo del grupo y
+        texto equivalente (mismo umbral del homologador, 82)."""
+        try:
+            if self._nl_crudo is None:
+                crudo = pd.read_excel(self._excel_path, sheet_name='Precios Contratados (real)')
+                crudo['unidad_norm'] = crudo['unidad'].map(normalize_unit)
+                self._nl_crudo = crudo
+            u = row['unidad_norm'] if 'unidad_norm' in row else normalize_unit(row['unidad'])
+            if u not in self._nl_crudo_pools:
+                pool = self._nl_crudo[self._nl_crudo['unidad_norm'] == u].copy()
+                pool['concepto_norm'] = pool['concepto'].map(normalize_text)
+                self._nl_crudo_pools[u] = pool
+            pool = self._nl_crudo_pools[u]
+            fmin, fmax = str(row['fecha_min'])[:10], str(row['fecha_max'])[:10]
+            pool = pool[(pool['fecha'].astype(str).str[:10] >= fmin) & (pool['fecha'].astype(str).str[:10] <= fmax)]
+            if pool.empty:
+                return pool
+            n = int(row.get('n_registros') or 1)
+            elegidos = process.extract(row['concepto_norm'], pool['concepto_norm'].tolist(),
+                                       scorer=fuzz.token_set_ratio, score_cutoff=82, limit=max(n * 2, 5))
+            idx = [i for _, _, i in elegidos][:n]
+            elegidos_df = pool.iloc[idx]
+            # Control: los renglones deben reproducir el grupo homologado
+            # (mismo número y misma mediana original, ±2 %). Si no, no se usan
+            # y el ajuste vuelve al método aproximado (se indica así).
+            if elegidos_df.empty or len(elegidos_df) != n:
+                return pool.iloc[0:0]
+            med = float(elegidos_df['precio_unitario'].median())
+            ref = float(row['precio_mediana'] or 0)
+            if ref and abs(med - ref) / ref > 0.02:
+                return pool.iloc[0:0]
+            return elegidos_df
+        except Exception:
+            return pd.DataFrame()
+
+    def fecha_de_precio(self, row, valor):
+        """Fecha del renglón crudo de NL cuyo precio ES el valor indicado
+        (p. ej. la mediana del grupo), para actualizarlo con el INPC de su
+        propio mes. None si no se localiza un renglón con ese precio exacto."""
+        try:
+            if valor is None:
+                return None
+            self.registros_nl(row)   # carga los renglones crudos de esa unidad
+            pool = self._nl_crudo_pools.get(row['unidad_norm'])
+            if pool is None or pool.empty:
+                return None
+            fmin, fmax = str(row['fecha_min'])[:10], str(row['fecha_max'])[:10]
+            f = pool['fecha'].astype(str).str[:10]
+            cand = pool[(f >= fmin) & (f <= fmax) & ((pool['precio_unitario'] - float(valor)).abs() < 0.005)]
+            if cand.empty:
+                return None
+            cand = cand.assign(_s=[fuzz.token_set_ratio(row['concepto_norm'], x) for x in cand['concepto_norm']])
+            cand = cand[cand['_s'] >= 85].sort_values('_s', ascending=False)
+            if cand.empty:
+                return None
+            c = cand.iloc[0]
+            return {'fecha': str(c['fecha'])[:10], 'licitacion': c.get('licitacion_id'), 'ocid': c.get('ocid'),
+                    'dependencia': c.get('dependencia'), 'proyecto': c.get('proyecto'), 'tipo': c.get('fuente'),
+                    'precio': float(c['precio_unitario'])}
+        except Exception:
+            return None
+
+    def par_de_mediana(self, row):
+        """Con número par de registros, la mediana es el promedio de dos
+        renglones: los localiza (precio y fecha) para actualizar cada uno con
+        el INPC de su mes."""
+        try:
+            self.registros_nl(row)
+            pool = self._nl_crudo_pools.get(row['unidad_norm'])
+            fmin, fmax = str(row['fecha_min'])[:10], str(row['fecha_max'])[:10]
+            f = pool['fecha'].astype(str).str[:10]
+            cand = pool[(f >= fmin) & (f <= fmax) & (pool['precio_unitario'] >= float(row['precio_min']) - 0.005)
+                        & (pool['precio_unitario'] <= float(row['precio_max']) + 0.005)]
+            cand = cand[[fuzz.token_set_ratio(row['concepto_norm'], x) >= 85 for x in cand['concepto_norm']]]
+            regs = cand.to_dict('records')
+            objetivo = float(row['precio_mediana'])
+            for i in range(len(regs)):
+                for j in range(i + 1, len(regs)):
+                    if abs((regs[i]['precio_unitario'] + regs[j]['precio_unitario']) / 2 - objetivo) < 0.01:
+                        return [regs[i], regs[j]]
+        except Exception:
+            pass
+        return None
+
+    def ajuste_nl(self, row, ajustar_inflacion=True) -> dict:
+        """Mediana/p25/p75 de un concepto NL actualizados por inflación con el
+        mes REAL de los contratos (por renglón, por el renglón que es la
+        mediana, o por el par que la promedia); el mes intermedio solo como
+        último recurso, marcado como aproximación."""
+        anio_dato = str(row['fecha_max'])[:4]
+        # Base de inflación: mes intermedio del periodo de los registros.
+        periodo_base = _inflacion.periodo_medio(row['fecha_min'], row['fecha_max']) or anio_dato
+        factor = factor_ajuste(periodo_base) if ajustar_inflacion else 1.0
+        p25_uso = ajustar_precio(row['precio_p25'], periodo_base) if ajustar_inflacion else float(row['precio_p25'])
+        p75_uso = ajustar_precio(row['precio_p75'], periodo_base) if ajustar_inflacion else float(row['precio_p75'])
+        mediana_uso = ajustar_precio(row['precio_mediana'], periodo_base) if ajustar_inflacion else float(row['precio_mediana'])
+        # Mejor: actualizar CADA renglón con el INPC de su propio mes y
+        # luego sacar mediana/p25/p75 (sin aproximar con un mes intermedio).
+        crudos = self.registros_nl(row)
+        metodo_inflacion = 'mes intermedio del periodo (aproximación: no se localizaron los renglones)'
+        detalle_registros = []
+        if ajustar_inflacion and not crudos.empty:
+            ajustados = [
+                float(p) * _inflacion.NIVEL_ACTUAL / _inflacion.indice_base(str(f)[:7])[0]
+                for p, f in zip(crudos['precio_unitario'], crudos['fecha'])
+            ]
+            serie = pd.Series(ajustados)
+            mediana_uso = round(float(serie.median()), 2)
+            p25_uso = round(float(serie.quantile(0.25)), 2)
+            p75_uso = round(float(serie.quantile(0.75)), 2)
+            factor = mediana_uso / float(row['precio_mediana']) if row['precio_mediana'] else factor
+            metodo_inflacion = f'cada uno de los {len(crudos)} renglones con el INPC de su mes'
+        if ajustar_inflacion and crudos.empty:
+            # Sin los renglones del grupo: se localiza el renglón cuyo precio
+            # ES cada estadístico (mediana, p25, p75) y se usa SU mes.
+            f_med = self.fecha_de_precio(row, row['precio_mediana'])
+            if f_med:
+                base_med = f_med['fecha'][:7]
+                mediana_uso = ajustar_precio(row['precio_mediana'], base_med)
+                f25 = self.fecha_de_precio(row, row['precio_p25'])
+                f75 = self.fecha_de_precio(row, row['precio_p75'])
+                p25_uso = ajustar_precio(row['precio_p25'], f25['fecha'][:7] if f25 else base_med)
+                p75_uso = ajustar_precio(row['precio_p75'], f75['fecha'][:7] if f75 else base_med)
+                factor = factor_ajuste(base_med)
+                periodo_base = base_med
+                metodo_inflacion = f'mes del renglón que es la mediana ({base_med})'
+                detalle_registros.append(f_med)
+            else:
+                par = self.par_de_mediana(row)
+                if par:
+                    ajust = [float(r_['precio_unitario']) * _inflacion.NIVEL_ACTUAL
+                             / _inflacion.indice_base(str(r_['fecha'])[:7])[0] for r_ in par]
+                    mediana_uso = round(sum(ajust) / 2, 2)
+                    factor = mediana_uso / float(row['precio_mediana'])
+                    meses = sorted({str(r_['fecha'])[:7] for r_ in par})
+                    periodo_base = meses[0]
+                    p25_uso = round(float(row['precio_p25']) * factor, 2)
+                    p75_uso = round(float(row['precio_p75']) * factor, 2)
+                    metodo_inflacion = (f"mediana = promedio de 2 renglones; cada uno con el INPC de su mes "
+                                        f"({' y '.join(meses)})")
+                    for r_ in par:
+                        detalle_registros.append({
+                            'fecha': str(r_['fecha'])[:10], 'precio': float(r_['precio_unitario']),
+                            'licitacion': r_.get('licitacion_id'), 'ocid': r_.get('ocid'),
+                            'dependencia': r_.get('dependencia'), 'proyecto': r_.get('proyecto'),
+                            'tipo': r_.get('fuente')})
+        for _, c in crudos.head(5).iterrows():
+            detalle_registros.append({
+                'fecha': str(c['fecha'])[:10], 'precio': float(c['precio_unitario']),
+                'licitacion': c.get('licitacion_id'), 'ocid': c.get('ocid'),
+                'dependencia': c.get('dependencia'), 'proyecto': c.get('proyecto'), 'tipo': c.get('fuente'),
+            })
+        tipos = set(crudos['fuente'].astype(str)) if not crudos.empty and 'fuente' in crudos else set()
+        if crudos.empty and detalle_registros:
+            tipos = {str(detalle_registros[0].get('tipo'))}
+        if not ajustar_inflacion:
+            factor = 1.0
+            p25_uso, p75_uso, mediana_uso = float(row['precio_p25']), float(row['precio_p75']), float(row['precio_mediana'])
+            metodo_inflacion = 'sin ajuste por inflación'
+        return {
+            'mediana': round(float(mediana_uso), 2), 'p25': round(float(p25_uso), 2), 'p75': round(float(p75_uso), 2),
+            'factor': factor, 'periodo_base': periodo_base, 'metodo': metodo_inflacion,
+            'registros_usados': int(len(crudos)), 'registros_detalle': detalle_registros,
+            'tipos': ', '.join(sorted(tipos)), 'anio_dato': anio_dato,
+        }
 
     def cargar_ragasa(self, df_o_ruta):
         """Conecta el historico real de compras de Ragasa cuando este disponible.
@@ -1033,15 +1208,15 @@ class ComparadorMultiFuente:
         u = normalize_unit(unidad)
         salida = []
         for score, row in self._top_pool(self._nl_pools, t, u, k):
-            anio = _inflacion.periodo_medio(row['fecha_min'], row['fecha_max']) or str(row['fecha_max'])[:4]
-            aj = (lambda x, a=anio: ajustar_precio(x, a)) if ajustar_inflacion else float
+            aj_nl = self.ajuste_nl(row, ajustar_inflacion)
+            med, p25, p75 = aj_nl['mediana'], aj_nl['p25'], aj_nl['p75']
             salida.append({
                 'fuente': 'Nuevo León',
                 'concepto': row['concepto_homologado'],
                 'unidad': row['unidad'],
-                'precio': round(aj(row['precio_mediana']), 2),
-                'rango_bajo': round(aj(row['precio_p25']), 2),
-                'rango_alto': round(aj(row['precio_p75']), 2),
+                'precio': round(float(med), 2),
+                'rango_bajo': round(float(p25), 2),
+                'rango_alto': round(float(p75), 2),
                 'n_registros': int(row['n_registros']),
                 'fecha': f"{str(row['fecha_min'])[:7]} a {str(row['fecha_max'])[:7]}",
                 'nota': 'mediana y rango p25-p75 de licitaciones SIASI (OCDS), ajustados por INPC'
@@ -1093,13 +1268,12 @@ class ComparadorMultiFuente:
         m = self._match_pool(self._nl_pools, t, u, min_score, scorer)
         if m:
             score, row, confianza = m
-            anio_dato = str(row['fecha_max'])[:4]
-            # Base de inflación: mes intermedio del periodo de los registros.
-            periodo_base = _inflacion.periodo_medio(row['fecha_min'], row['fecha_max']) or anio_dato
-            factor = factor_ajuste(periodo_base) if ajustar_inflacion else 1.0
-            p25_uso = ajustar_precio(row['precio_p25'], periodo_base) if ajustar_inflacion else float(row['precio_p25'])
-            p75_uso = ajustar_precio(row['precio_p75'], periodo_base) if ajustar_inflacion else float(row['precio_p75'])
-            mediana_uso = ajustar_precio(row['precio_mediana'], periodo_base) if ajustar_inflacion else float(row['precio_mediana'])
+            aj_nl = self.ajuste_nl(row, ajustar_inflacion)
+            anio_dato = aj_nl['anio_dato']
+            periodo_base, factor = aj_nl['periodo_base'], aj_nl['factor']
+            p25_uso, p75_uso, mediana_uso = aj_nl['p25'], aj_nl['p75'], aj_nl['mediana']
+            metodo_inflacion, detalle_registros = aj_nl['metodo'], aj_nl['registros_detalle']
+            crudos_n = aj_nl['registros_usados']
             # "EN MERCADO" = dentro de +/-5% del precio mediano de
             # referencia (ver MARGEN_EN_MERCADO), no de la banda p25-p75.
             banda_baja, banda_alta = banda_en_mercado(mediana_uso)
@@ -1114,6 +1288,10 @@ class ComparadorMultiFuente:
                 'variabilidad': row['variabilidad'],
                 'anio_dato_mas_reciente': anio_dato,
                 'periodo_base_inflacion': periodo_base,
+                'metodo_inflacion': metodo_inflacion,
+                'registros_usados': crudos_n,
+                'registros_detalle': detalle_registros,
+                'tipo_registros': aj_nl['tipos'],
                 'ajuste_inflacion_aplicado': ajustar_inflacion,
                 'factor_ajuste_inpc': round(factor, 4),
                 'precio_p25_ajustado': p25_uso, 'precio_p75_ajustado': p75_uso,
