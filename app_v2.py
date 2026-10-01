@@ -170,11 +170,13 @@ def _inflacion_nl(nl: dict) -> dict:
             "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
             "factor": round(ajustada / original, 4) if original else None,
             "justificacion": (
-                f"Cada uno de los {usados} contratos equivalentes (misma unidad, texto casi idéntico, sin "
-                "especificaciones en conflicto y sin cifras atípicas) se actualizó con el INPC de su propio mes "
-                + f"({fuente_indice})"
-                + " y después se calculó la mediana; el factor mostrado es el efectivo (mediana actualizada ÷ "
-                  "mediana original)."
+                f"{nl.get('n_renglones') or usados} renglones equivalentes (misma unidad, texto casi idéntico, sin "
+                "especificaciones en conflicto y sin cifras atípicas) de "
+                f"{nl.get('n_registros')} contrato(s) distintos (OCID). Cada renglón se actualizó con el INPC de su "
+                f"propio mes ({fuente_indice}); luego se tomó la mediana de cada contrato (la base no trae el número "
+                "de partida, así que varios renglones de un mismo contrato cuentan como una sola observación) y "
+                "después la mediana entre contratos. El factor mostrado es el efectivo. Todos los renglones, con "
+                "índice base, factor y precio actualizado, están en la hoja 'Inflación NL' del Excel."
             ),
         }
     d = ajuste_inflacion.detalle_ajuste(
@@ -3068,6 +3070,8 @@ if archivo is not None:
                         "inflacion": (_inflacion_nl(nl) if (_anio_nl and ajustar_inflacion) else None),
                         "tipo_registros": nl.get("tipo_registros"),
                         "registros_detalle": nl.get("registros_detalle"),
+                        "registros_todos": nl.get("registros_todos") or [],
+                        "n_renglones": nl.get("n_renglones"),
                     })
                     evaluaciones["cdmx"].update({
                         "documento": ("Tabulador General de Precios Unitarios del Gobierno de la CDMX, edición 2026 "
@@ -3370,7 +3374,7 @@ if archivo is not None:
                            "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
                            "filtros coinciden y cuántos están validados; no promedia precios. Precios antes de IVA: "
                            + ("se usa el subtotal sin IVA de la cotización." if metadatos.get("iva_en_documento") else
-                              "la cotización no indica IVA; se toman como precios sin IVA (criterio de Compras, por confirmar)."))
+                              "la cotización no indica IVA; se supone que sus precios son antes de IVA (por confirmar con el proveedor)."))
 
                 # ---------------- 3. Acción principal ----------------
                 def _nombre_corto(concepto):
@@ -3587,6 +3591,16 @@ if archivo is not None:
                             "CSV de referencias de mercado",
                             data=pd.DataFrame(datos_mdo["referencias"]).to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"mercado_{nombre_proveedor}_{nombre_proyecto}.csv",
+                            mime="text/csv",
+                        )
+                        _regs_nl = [
+                            {"#": f.get("Partida"), "Concepto cotizado": f.get("Concepto"), **r}
+                            for f in filas for r in (f["_evaluaciones"]["nl"].get("registros_todos") or [])
+                        ]
+                        st.download_button(
+                            "CSV de contratos NL usados (inflación por registro)",
+                            data=pd.DataFrame(_regs_nl).to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"inflacion_nl_{nombre_proveedor}_{nombre_proyecto}.csv",
                             mime="text/csv",
                         )
 

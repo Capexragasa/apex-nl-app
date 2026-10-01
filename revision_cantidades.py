@@ -214,8 +214,8 @@ def revisar(partidas: list[dict], total_declarado=None, contexto: str = "", iva_
     alcances = [
         (f"IVA: la cotización lo desglosa; se compara el subtotal sin IVA (${total_para_iva:,.2f})."
          if iva_en_documento else
-         f"IVA: la cotización no indica si sus precios incluyen IVA. Se toman como precios sin IVA "
-         f"(criterio de Compras); si lo incluyeran, el subtotal sería ${total_para_iva / (1 + IVA):,.2f} "
+         f"IVA: la cotización no indica si sus precios incluyen IVA. Supuesto: precios antes de IVA "
+         f"(por confirmar con el proveedor); si lo incluyeran, el subtotal sería ${total_para_iva / (1 + IVA):,.2f} "
          f"y cada P.U. bajaría 13.8 %. Confirmar con el proveedor."),
         "Vigencia de la cotización, condiciones de pago y tiempo de entrega.",
         "Retiro de escombro, limpieza final y curado de concreto.",

@@ -158,7 +158,7 @@ _GRUPOS_OBJETO = {
     "cadena": {"cerramiento", "dala", "cadena"},
     "muro": {"muro", "barda", "pretil"},
     "barda": {"muro", "barda", "pretil"},
-    "estuco": {"estuco"},
+    "estuco": {"estuco", "aplanado"},
     "aplanado": {"aplanado", "repellado", "enjarre", "estuco", "zarpeo"},
     "grua": {"grua"},
 }
@@ -167,6 +167,10 @@ _GRUPOS_OBJETO = {
 def _cabeza(texto: str, n: int) -> str:
     """Primeras n palabras del objeto, sin códigos ni verbos de obra."""
     t = _plano(texto)
+    # Quita códigos, claves entre paréntesis y unidades sueltas al inicio:
+    # "3182000026 (M50300129) SUMINISTRO..." o "M3 13.47 SUMINISTRO...".
+    for _ in range(4):
+        t = re.sub(r"^\s*(\(?[a-z]{0,4}\d[\w.\-]*\)?|\b(m2|m3|ml|m|pza|kg|lote|jgo|total)\b)[\s,.:;-]*", "", t)
     t = re.sub(r"^[\W\d.\-]*", "", t)
     t = re.sub(rf"^((({_VERBOS_OBRA})\b[\s,]*)|(\b(y|e|de|del|o)\b\s*))+", "", t)
     palabras = [p for p in re.findall(r"[a-z0-9']+", t)]
@@ -205,7 +209,7 @@ def alcance_distinto(cotizado: str, referencia: str):
         sinonimos = _GRUPOS_OBJETO.get(clave, {clave})
         # Las dos primeras palabras con significado: el objeto, no un
         # complemento ("cónsula modular, anclaje a columna").
-        cabeza = " ".join([w for w in _cabeza(candidato, 8).split() if w not in _RELLENO][:2])
+        cabeza = " ".join([w for w in _cabeza(candidato, 8).split() if w not in _RELLENO][:1])
         if not any(re.search(rf"\b{re.escape(x)}(e?s)?\b", cabeza) for x in sinonimos):
             return (f"lo que se suministra o ejecuta es otro: la partida es «{clave}» y la referencia es "
                     f"«{' '.join(_cabeza(candidato, 3).split())}…»")
@@ -736,9 +740,12 @@ def evidencia(ev: dict, concepto: str) -> dict:
         "Justificación del periodo base": inf.get("justificacion", ""),
         "Nota de inflación": ("el ajuste por inflación no confirma vigencia comercial ni equivalencia técnica"
                               if inf else ""),
-        "Registros de origen": "; ".join(
-            f"{r.get('fecha')} · {r.get('licitacion') or ''} · {r.get('dependencia') or ''} · ${r.get('precio'):,.2f}"
-            for r in (ev.get("registros_detalle") or [])[:5]),
+        "Registros de origen": (
+            f"{ev.get('n_renglones')} renglones en "
+            f"{len({(r.get('ocid') or r.get('licitacion')) for r in ev.get('registros_todos')})} contrato(s) (OCID); "
+            "detalle completo en la hoja 'Inflación NL'" if ev.get("registros_todos") else "; ".join(
+                f"{r.get('fecha')} · {r.get('licitacion') or ''} · {r.get('dependencia') or ''} · ${r.get('precio'):,.2f}"
+                for r in (ev.get("registros_detalle") or [])[:5])),
         "Referencias rechazadas": "; ".join(
             f"{r.get('codigo') or ''} {str(r.get('concepto'))[:80]} (${r.get('precio') or 0:,.2f}"
             f"{', pág. ' + str(r.get('pagina')) if r.get('pagina') else ''}) — {r.get('motivo')}"

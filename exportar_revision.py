@@ -590,6 +590,50 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     we.fit_to_pages(1, 0)
 
     # ==================================================================
+    # Hoja: Inflación NL (todos los renglones usados, reproducible)
+    # ==================================================================
+    regs = [(f, r) for f in filas for r in ((f.get("_evaluaciones") or {}).get("nl", {}).get("registros_todos") or [])]
+    if regs:
+        wi = wb.add_worksheet("Inflación NL")
+        cab_i = ["#", "Concepto cotizado", "Fila en 'Precios Contratados (real)'", "OCID", "Licitación",
+                 "Dependencia", "Tipo", "Concepto del contrato", "Fecha", "Precio original", "Mes del índice",
+                 "INPC base", "Cómo se obtuvo el INPC base", "Mes final", "INPC final", "Factor (final ÷ base)",
+                 "Precio actualizado", "Contrato (para la mediana)"]
+        wi.merge_range(0, 0, 0, len(cab_i) - 1, "Actualización por inflación de cada renglón de Nuevo León", f_titulo)
+        wi.set_row(0, 26)
+        wi.write(1, 0, "Cada renglón se actualiza con el INPC de su mes (INEGI). La referencia NL es la mediana por "
+                       "contrato (OCID) y después la mediana entre contratos: varios renglones de un mismo contrato "
+                       "cuentan como una sola observación porque la base no trae el número de partida. El ajuste "
+                       "no confirma vigencia comercial ni equivalencia técnica.", f_sub)
+        for c, t in enumerate(cab_i):
+            wi.write(3, c, t, f_cab)
+        wi.set_row(3, 30)
+        f_ind = fmt(num_format="0.000")
+        f_fac = fmt(num_format="0.000000")
+        for k, (f, r) in enumerate(regs):
+            fila = 4 + k
+            R = fila + 1
+            valores = [f.get("Partida"), f.get("Concepto"), r.get("fila_hoja"), r.get("ocid"), r.get("licitacion"),
+                       r.get("dependencia"), r.get("tipo"), r.get("concepto"), r.get("fecha")]
+            for c, val in enumerate(valores):
+                wi.write(fila, c, "" if val is None else val, f_txt if c in (1, 5, 7) else f_centro)
+            wi.write_number(fila, 9, r["precio_original"], f_mon)
+            wi.write(fila, 10, r.get("indice_mes"), f_centro)
+            wi.write_number(fila, 11, r["indice_base"], f_ind)
+            wi.write(fila, 12, r.get("metodo_indice"), f_txt)
+            wi.write(fila, 13, r.get("indice_final_mes"), f_centro)
+            wi.write_number(fila, 14, r["indice_final"], f_ind)
+            wi.write_formula(fila, 15, f"=O{R}/L{R}", f_fac, r["factor"])
+            wi.write_formula(fila, 16, f"=ROUND(J{R}*P{R},2)", f_mon, r["precio_actualizado"])
+            wi.write(fila, 17, r.get("ocid") or r.get("licitacion"), f_centro)
+        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30]):
+            wi.set_column(c, c, ancho)
+        wi.freeze_panes(4, 2)
+        wi.hide_gridlines(2)
+        wi.set_landscape()
+        wi.fit_to_pages(1, 0)
+
+    # ==================================================================
     # Hoja 4: Metodología
     # ==================================================================
     wm = wb.add_worksheet("Metodología")

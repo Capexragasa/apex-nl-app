@@ -345,7 +345,8 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
             if rechazadas is not None and patron_u.search(ctx) and (menciona or
                     max((fuzz.token_set_ratio(c, ctx) for c in consultas), default=0) >= UMBRAL_TEXTO):
                 rechazadas.append({"codigo": _codigo(contexto), "concepto": _limpiar_concepto(contexto)[:160],
-                                   "precio": precios[0], "motivo": motivo_rechazo, "url": url, "pagina": pagina})
+                                   "precio": precios[0], "motivo": motivo_rechazo, "url": url, "pagina": pagina,
+                                   "similitud": max((fuzz.token_set_ratio(c, ctx) for c in consultas), default=0)})
             continue
         # Especificación distinta (otra sección, f'c, calibre) o precio por
         # pieza de un tamaño que la partida no declara: se busca otra fuente.
@@ -476,9 +477,9 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
                      + f"se revisaron {paginas_leidas} página(s) con {len(consultas_hechas)} búsqueda(s)"
                      + (f"; se rechazaron {len(rechazadas)} concepto(s) parecido(s) en palabras pero distinto(s): "
                         + " | ".join(f"{r['codigo'] or ''} {r['concepto'][:70]} (${r['precio']:,.2f}) — {r['motivo']}"
-                                     for r in rechazadas[:3])
+                                     for r in sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:3])
                         if rechazadas else "; ningún renglón tenía el mismo material, trabajo y unidad.")),
-            "rechazadas": rechazadas[:5],
+            "rechazadas": sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:5],
             "consultas": consultas_hechas, "paginas_revisadas": paginas_leidas,
         }
 

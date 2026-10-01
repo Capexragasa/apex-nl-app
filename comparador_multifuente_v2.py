@@ -979,19 +979,39 @@ class ComparadorMultiFuente:
         crudos = self.registros_nl(row)
         metodo_inflacion = 'mes intermedio del periodo (aproximación: no se localizaron los renglones)'
         detalle_registros = []
+        registros_todos = []
+        n_contratos = 0
         if ajustar_inflacion and not crudos.empty:
-            ajustados = [
-                float(p) * _inflacion.NIVEL_ACTUAL / _inflacion.indice_base(str(f)[:7])[0]
-                for p, f in zip(crudos['precio_unitario'], crudos['fecha'])
-            ]
-            serie = pd.Series(ajustados)
+            # 1) Cada renglón con el INPC de SU mes (todo exportable).
+            for idx_hoja, c in crudos.iterrows():
+                base, etiqueta, metodo_ind = _inflacion.indice_base(str(c['fecha'])[:7])
+                fac = _inflacion.NIVEL_ACTUAL / base
+                registros_todos.append({
+                    'fila_hoja': int(idx_hoja) + 2,   # fila en 'Precios Contratados (real)'
+                    'ocid': c.get('ocid'), 'licitacion': c.get('licitacion_id'),
+                    'dependencia': c.get('dependencia'), 'proyecto': c.get('proyecto'), 'tipo': c.get('fuente'),
+                    'concepto': str(c.get('concepto'))[:200], 'fecha': str(c['fecha'])[:10],
+                    'precio_original': float(c['precio_unitario']),
+                    'indice_mes': etiqueta, 'indice_base': base, 'metodo_indice': metodo_ind,
+                    'indice_final_mes': _inflacion.ETIQUETA_ACTUAL, 'indice_final': _inflacion.NIVEL_ACTUAL,
+                    'factor': round(fac, 6), 'precio_actualizado': round(float(c['precio_unitario']) * fac, 2),
+                })
+            # 2) Un contrato (OCID) = una observación: la base no trae el
+            #    identificador de partida, así que varios renglones del mismo
+            #    contrato no se cuentan como contratos independientes.
+            df_r = pd.DataFrame(registros_todos)
+            df_r['contrato'] = df_r['ocid'].fillna(df_r['licitacion']).astype(str)
+            por_contrato = df_r.groupby('contrato').agg(actualizado=('precio_actualizado', 'median'),
+                                                        original=('precio_original', 'median'))
+            n_contratos = int(len(por_contrato))
+            serie = por_contrato['actualizado']
             mediana_uso = round(float(serie.median()), 2)
             p25_uso = round(float(serie.quantile(0.25)), 2)
             p75_uso = round(float(serie.quantile(0.75)), 2)
-            _med_orig = float(crudos['precio_unitario'].median())
+            _med_orig = float(por_contrato['original'].median())
             factor = mediana_uso / _med_orig if _med_orig else factor
-            metodo_inflacion = (f'cada uno de los {len(crudos)} contratos equivalentes con el INPC de su mes; '
-                                'después la mediana')
+            metodo_inflacion = (f'{len(crudos)} renglones en {n_contratos} contrato(s): cada renglón con el INPC '
+                                'de su mes; mediana por contrato y después mediana entre contratos')
         if ajustar_inflacion and crudos.empty:
             # Sin los renglones del grupo: se localiza el renglón cuyo precio
             # ES cada estadístico (mediana, p25, p75) y se usa SU mes.
@@ -1041,9 +1061,13 @@ class ComparadorMultiFuente:
             metodo_inflacion = 'sin ajuste por inflación'
         grupo_ok = (not crudos.empty) and ajustar_inflacion
         return {
-            'mediana_original': (round(float(crudos['precio_unitario'].median()), 2) if grupo_ok
+            'mediana_original': (round(float(pd.DataFrame(registros_todos).assign(
+                                    k=lambda d: d['ocid'].fillna(d['licitacion']).astype(str))
+                                    .groupby('k')['precio_original'].median().median()), 2) if grupo_ok
                                  else float(row['precio_mediana'])),
-            'n': int(len(crudos)) if grupo_ok else int(row['n_registros']),
+            'n': n_contratos if grupo_ok else int(row['n_registros']),
+            'n_renglones': int(len(crudos)) if grupo_ok else int(row['n_registros']),
+            'registros_todos': registros_todos,
             'fecha_min': (str(crudos['fecha'].astype(str).min())[:10] if grupo_ok else str(row['fecha_min'])[:10]),
             'fecha_max': (str(crudos['fecha'].astype(str).max())[:10] if grupo_ok else str(row['fecha_max'])[:10]),
             'mediana': round(float(mediana_uso), 2), 'p25': round(float(p25_uso), 2), 'p75': round(float(p75_uso), 2),
@@ -1307,6 +1331,8 @@ class ComparadorMultiFuente:
                 'periodo_base_inflacion': periodo_base,
                 'metodo_inflacion': metodo_inflacion,
                 'registros_usados': crudos_n,
+                'registros_todos': aj_nl.get('registros_todos', []),
+                'n_renglones': aj_nl.get('n_renglones'),
                 'registros_detalle': detalle_registros,
                 'tipo_registros': aj_nl['tipos'],
                 'ajuste_inflacion_aplicado': ajustar_inflacion,
