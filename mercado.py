@@ -109,8 +109,8 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
                 for campo in ("rango_bajo", "rango_alto"):
                     if ref.get(campo):
                         ref[campo] = round(ref[campo] * factor, 2)
-                ref["unidad"] = "PZA (equiv.)"
-                ref["relacion"] = "mismo material"
+                ref["unidad"] = "PZA (escenario)"
+                ref["relacion"] = "escenario por pieza"
                 ref["equivalencia"] = (
                     f"${ref['precio_ml']:,.2f}/ml × {altura_total:g} m de alto "
                     f"(muro {float(altura_muro):g} m + cerramiento {ALTURA_CERRAMIENTO:g} m, supuesto)"
@@ -132,20 +132,34 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
             ref["posicion"] = _posicion(precio, ref)
             referencias.append(ref)
 
+        # Los escenarios por pieza (castillo por ml × altura supuesta) se
+        # muestran, pero NO entran al rango de mercado hasta confirmar
+        # dimensiones con el proveedor.
         mismos = [r for r in filas if r["relacion"] == "mismo material"]
-        base = mismos or filas
+        base = mismos or [r for r in filas if r["relacion"] != "escenario por pieza"]
         if base:
-            valores = [v for r in base for v in (r.get("rango_bajo"), r.get("precio"), r.get("rango_alto")) if v]
-            minimo, maximo = min(valores), max(valores)
+            # Puntos de comparación: p25/p75 en NL (no son mínimo ni máximo
+            # absolutos) y precio único en CDMX.
+            puntos = []
+            for r in base:
+                if r.get("rango_bajo") and r.get("rango_alto"):
+                    puntos += [(r["rango_bajo"], f"p25 de {r['fuente']}"), (r["rango_alto"], f"p75 de {r['fuente']}")]
+                else:
+                    puntos.append((r["precio"], f"precio {r['fuente']}"))
+            (minimo, etq_min), (maximo, etq_max) = min(puntos), max(puntos)
             medianas = sorted(r["precio"] for r in base)
             mediana = medianas[len(medianas) // 2] if len(medianas) % 2 else round(
                 (medianas[len(medianas) // 2 - 1] + medianas[len(medianas) // 2]) / 2, 2)
+            def _desc(etq):
+                return ("percentil 75 de la referencia histórica NL" if etq.startswith("p75") else
+                        "percentil 25 de la referencia histórica NL" if etq.startswith("p25") else
+                        etq)
             if precio > maximo:
-                pos = f"🔴 encima de todo lo observado ({(precio / maximo - 1) * 100:+.0f}% vs máximo)"
+                pos = f"🔴 por encima del {_desc(etq_max)} ({(precio / maximo - 1) * 100:+.0f}%)"
             elif precio < minimo:
-                pos = f"🟢 debajo de todo lo observado ({(precio / minimo - 1) * 100:+.0f}% vs mínimo)"
+                pos = f"🟢 por debajo del {_desc(etq_min)} ({(precio / minimo - 1) * 100:+.0f}%)"
             else:
-                pos = "🟡 dentro del rango observado"
+                pos = "🟡 dentro del rango de referencias"
             resumen.append({
                 "partida": p.get("partida"),
                 "concepto": concepto,
@@ -153,6 +167,8 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
                 "precio_cotizado": precio,
                 "referencias": len(base),
                 "tipo": "mismo material" if mismos else "solo conceptos relacionados",
+                "minimo_etiqueta": etq_min,
+                "maximo_etiqueta": etq_max,
                 "minimo": round(minimo, 2),
                 "mediana_referencias": round(mediana, 2),
                 "maximo": round(maximo, 2),
@@ -160,10 +176,16 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
                 "posicion": pos,
             })
         else:
+            escenarios = [r for r in filas if r["relacion"] == "escenario por pieza"]
             resumen.append({
                 "partida": p.get("partida"), "concepto": concepto, "unidad": unidad,
-                "precio_cotizado": precio, "referencias": 0, "tipo": "sin referencias",
+                "precio_cotizado": precio, "referencias": 0,
+                "minimo_etiqueta": None, "maximo_etiqueta": None,
+                "tipo": ("sin referencias por pieza (hay escenario por ml × altura supuesta)"
+                         if escenarios else "sin referencias"),
                 "minimo": None, "mediana_referencias": None, "maximo": None,
-                "vs_mediana_pct": None, "posicion": "⚪ sin datos de mercado en NL/CDMX",
+                "vs_mediana_pct": None,
+                "posicion": ("⚪ sin referencia por pieza: confirmar dimensiones (ver escenario)"
+                             if escenarios else "⚪ sin datos de mercado en NL/CDMX"),
             })
     return {"referencias": referencias, "resumen": resumen}
