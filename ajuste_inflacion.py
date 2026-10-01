@@ -35,6 +35,18 @@ de materiales muy volatiles (acero, cobre, cemento, combustibles).
 # Nivel del INPC (base: 2a quincena de julio de 2018 = 100).
 # Fuente: boletines de prensa del INEGI, https://www.inegi.org.mx/temas/inpc/
 INPC_NIVEL_DICIEMBRE = {
+    # 2012-2020: necesarios porque muchos contratos de NL se concursaron en
+    # esos años (el año real está en el número de licitación), aunque el
+    # registro se haya publicado después.
+    2012: 80.568,
+    2013: 83.770,
+    2014: 87.189,
+    2015: 89.047,
+    2016: 92.039,
+    2017: 98.273,
+    2018: 103.020,
+    2019: 105.934,
+    2020: 109.271,
     2021: 117.314,
     2022: 126.539,
     2023: 132.373,
@@ -49,6 +61,12 @@ INPC_NIVEL_DICIEMBRE = {
 # o cuando corre la tarea programada mensual.
 NIVEL_ACTUAL = 145.131
 ETIQUETA_ACTUAL = "junio 2026"
+# Índice con el que se actualizan los precios. Por defecto el INPC general.
+# Si en Secrets se configura 'inegi_indicador_construccion' (clave de un
+# índice de precios de construcción del Banco de Información Económica de
+# INEGI, p. ej. el INPP de construcción), se usa ese índice en su lugar.
+INDICE_NOMBRE = "INPC general, INEGI (base 2a quincena julio 2018 = 100)"
+INDICE_ES_CONSTRUCCION = False
 FUENTE = "INEGI, Indice Nacional de Precios al Consumidor (INPC): https://www.inegi.org.mx/temas/inpc/"
 
 
@@ -191,6 +209,51 @@ def refrescar_nivel_actual(token=None, forzar=False):
 
     NIVEL_ACTUAL = resultado["nivel"]
     ETIQUETA_ACTUAL = _etiqueta_desde_periodo(resultado["periodo"])
+    _activar_indice_construccion(token)
+    return True
+
+
+def _leer_secret(nombre):
+    valor = os.environ.get(nombre.upper())
+    if valor:
+        return valor
+    try:
+        import streamlit as st
+        if nombre in st.secrets:
+            return str(st.secrets[nombre]).strip()
+    except Exception:
+        pass
+    return None
+
+
+def _activar_indice_construccion(token=None):
+    """Si hay un indicador de construcción configurado y la API responde con
+    una serie mensual suficiente, lo deja como índice activo (sin mezclarlo
+    con el INPC)."""
+    global NIVEL_ACTUAL, ETIQUETA_ACTUAL, INDICE_NOMBRE, INDICE_ES_CONSTRUCCION
+    indicador = _leer_secret("inegi_indicador_construccion")
+    token = _obtener_token(token)
+    if not indicador or not token:
+        return False
+    url = _INEGI_API_URL.format(indicador=indicador, token=token)
+    try:
+        with urllib.request.urlopen(url, timeout=12) as respuesta:
+            datos = json.loads(respuesta.read().decode("utf-8"))
+        observaciones = datos["Series"][0]["OBSERVATIONS"]
+        serie = {str(o["TIME_PERIOD"]): float(o["OBS_VALUE"]) for o in observaciones
+                 if o.get("OBS_VALUE") not in (None, "")}
+    except Exception:
+        return False
+    if len(serie) < 24:
+        return False
+    ultimo = max(serie)
+    _SERIE_MENSUAL.clear()
+    _SERIE_MENSUAL.update(serie)
+    NIVEL_ACTUAL = serie[ultimo]
+    ETIQUETA_ACTUAL = _etiqueta_desde_periodo(ultimo)
+    INDICE_NOMBRE = (_leer_secret("inegi_nombre_indice_construccion")
+                     or f"Índice de precios de construcción, INEGI (indicador {indicador})")
+    INDICE_ES_CONSTRUCCION = True
     return True
 
 
@@ -218,6 +281,14 @@ def indice_base(periodo):
     disponibles = sorted(INPC_NIVEL_DICIEMBRE)
     anio = int(m.group(1)) if m else disponibles[-1]
     mes = int(m.group(2)) if m and m.group(2) else None
+    if INDICE_ES_CONSTRUCCION and _SERIE_MENSUAL:
+        # Índice de construcción activo: solo se usa su propia serie.
+        clave = f"{anio}/{(mes or 12):02d}"
+        if clave in _SERIE_MENSUAL:
+            return _SERIE_MENSUAL[clave], _etiqueta_desde_periodo(clave), "índice mensual publicado (INEGI)"
+        cercano = min(_SERIE_MENSUAL, key=lambda k: abs((int(k[:4]) * 12 + int(k[5:7])) - (anio * 12 + (mes or 12))))
+        return (_SERIE_MENSUAL[cercano], _etiqueta_desde_periodo(cercano),
+                f"mes más cercano disponible del índice ({_etiqueta_desde_periodo(cercano)})")
     if mes == 12 and anio in INPC_NIVEL_DICIEMBRE and f"{anio}/12" not in _SERIE_MENSUAL:
         return INPC_NIVEL_DICIEMBRE[anio], f"diciembre {anio}", "INPC de diciembre publicado (INEGI)"
     if mes:
@@ -271,7 +342,7 @@ def detalle_ajuste(periodo, fecha_min=None, fecha_max=None) -> dict:
     valor, etiqueta, metodo = indice_base(periodo)
     rango = f"{str(fecha_min)[:7]} a {str(fecha_max)[:7]}" if fecha_min and fecha_max else ""
     return {
-        "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
+        "indice": INDICE_NOMBRE,
         "periodo_base": etiqueta,
         "valor_base": valor,
         "periodo_final": ETIQUETA_ACTUAL,
@@ -284,4 +355,35 @@ def detalle_ajuste(periodo, fecha_min=None, fecha_max=None) -> dict:
               f"Todos los registros son de {etiqueta}; ese mes es la base. ") if rango else "")
             + f"Valor base: {metodo}."
         ),
+    }
+
+
+def desglose_acumulado(periodo) -> dict:
+    """Inflación ACUMULADA (compuesta) desde el periodo base hasta hoy, con
+    el desglose año por año. factor = INPC final ÷ INPC base = producto de
+    (1 + inflación de cada tramo); no es una suma de porcentajes."""
+    valor_base, etiqueta_base, metodo = indice_base(periodo)
+    m = re.match(r"(\d{4})(?:[-/](\d{1,2}))?", str(periodo or ""))
+    anio = int(m.group(1)) if m else None
+    tramos, previo, etq_previa = [], valor_base, etiqueta_base
+    if anio:
+        anio_final = int(re.search(r"(\d{4})", ETIQUETA_ACTUAL).group(1)) if re.search(r"(\d{4})", ETIQUETA_ACTUAL) else anio
+        for a in range(anio, anio_final):
+            v = _SERIE_MENSUAL.get(f"{a}/12") or (None if INDICE_ES_CONSTRUCCION else INPC_NIVEL_DICIEMBRE.get(a))
+            if not v or f"diciembre {a}" == etq_previa or v == previo:
+                continue
+            tramos.append({"de": etq_previa, "a": f"diciembre {a}", "valor_de": previo, "valor_a": v,
+                           "inflacion_pct": round((v / previo - 1) * 100, 2),
+                           "acumulada_pct": round((v / valor_base - 1) * 100, 2)})
+            previo, etq_previa = v, f"diciembre {a}"
+    if NIVEL_ACTUAL != previo:
+        tramos.append({"de": etq_previa, "a": ETIQUETA_ACTUAL, "valor_de": previo, "valor_a": NIVEL_ACTUAL,
+                       "inflacion_pct": round((NIVEL_ACTUAL / previo - 1) * 100, 2),
+                       "acumulada_pct": round((NIVEL_ACTUAL / valor_base - 1) * 100, 2)})
+    return {
+        "indice": INDICE_NOMBRE, "base": etiqueta_base, "valor_base": valor_base,
+        "final": ETIQUETA_ACTUAL, "valor_final": NIVEL_ACTUAL,
+        "factor": round(NIVEL_ACTUAL / valor_base, 6),
+        "acumulada_pct": round((NIVEL_ACTUAL / valor_base - 1) * 100, 2),
+        "tramos": tramos, "metodo_base": metodo,
     }

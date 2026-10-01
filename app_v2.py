@@ -49,6 +49,7 @@ import ajuste_inflacion
 import revision_ia
 import validacion_referencias as validacion
 import revision_cantidades
+import recomendacion
 import mercado
 import exportar_revision
 import busqueda_mercado_ia
@@ -129,6 +130,37 @@ FECHA_TABULADOR_CDMX = "2026-05"
 comparador = cargar_comparador()
 
 
+def _acumulada(d: dict, periodo=None, registros=None) -> dict:
+    """Añade al detalle de inflación la inflación ACUMULADA (compuesta) que
+    realmente se aplicó: el % total, el rango entre renglones y el desglose
+    año por año (cuyo producto es el factor)."""
+    if not d:
+        return d
+    factor = d.get("factor")
+    d["indice"] = ajuste_inflacion.INDICE_NOMBRE
+    d["acumulada_pct"] = round((float(factor) - 1) * 100, 2) if factor else None
+    registros = [r for r in (registros or []) if r.get("inflacion_acumulada_pct") is not None]
+    if registros:
+        _per = lambda r: str(r.get("periodo_precio") or r.get("fecha"))[:7]
+        viejo = min(registros, key=_per)
+        nuevo_ = max(registros, key=_per)
+        d["acumulada_rango"] = (
+            f"de +{nuevo_['inflacion_acumulada_pct']:.1f} % (precio más reciente, {_per(nuevo_)}) "
+            f"a +{viejo['inflacion_acumulada_pct']:.1f} % (precio más antiguo, {_per(viejo)})"
+            if viejo is not nuevo_ and viejo["inflacion_acumulada_pct"] != nuevo_["inflacion_acumulada_pct"]
+            else f"+{viejo['inflacion_acumulada_pct']:.1f} % ({_per(viejo)})")
+        periodo = periodo or _per(viejo)
+    if periodo:
+        try:
+            desg = ajuste_inflacion.desglose_acumulado(str(periodo)[:7])
+            d["tramos"] = desg["tramos"]
+            d["tramos_desde"] = desg["base"]
+            d["tramos_acumulada_pct"] = desg["acumulada_pct"]
+        except Exception:
+            pass
+    return d
+
+
 def _inflacion_nl(nl: dict) -> dict:
     """Detalle reproducible del ajuste por inflación de la referencia NL."""
     usados = nl.get("registros_usados") or 0
@@ -142,13 +174,12 @@ def _inflacion_nl(nl: dict) -> dict:
         d["justificacion"] = (
             f"La mediana del grupo (${nl.get('precio_mediana'):,.2f}) es el precio del contrato "
             f"{r0.get('licitacion') or ''} ({r0.get('dependencia') or ''}) del {r0.get('fecha')}; se actualizó con "
-            f"el INPC de ese mes ({fuente_indice}). p25 y p75 con el mes de su propio renglón cuando se localiza.")
-        return d
+            f"el índice de ese mes ({fuente_indice}). p25 y p75 con el mes de su propio renglón cuando se localiza.")
+        return _acumulada(d, nl.get("periodo_base_inflacion"))
     if metodo.startswith("mediana = promedio") and regs:
         original = nl.get("precio_mediana") or 0
         ajustada = nl.get("precio_mediana_ajustada") or 0
-        return {
-            "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
+        return _acumulada({
             "periodo_base": " y ".join(sorted({str(r.get('fecha'))[:7] for r in regs})),
             "valor_base": None,
             "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
@@ -157,8 +188,8 @@ def _inflacion_nl(nl: dict) -> dict:
             "justificacion": (
                 "La mediana es el promedio de dos contratos: " + "; ".join(
                     f"{r.get('licitacion') or ''} del {r.get('fecha')} (${r.get('precio'):,.2f})" for r in regs)
-                + f". Cada uno se actualizó con el INPC de su mes ({fuente_indice}) y se promedió; factor efectivo."),
-        }
+                + f". Cada uno se actualizó con el índice de su mes ({fuente_indice}) y se promedió; factor efectivo."),
+        }, min(str(r.get('fecha'))[:7] for r in regs))
     todos = nl.get("registros_todos") or []
     if todos:
         original = nl.get("precio_mediana") or 0
@@ -166,12 +197,13 @@ def _inflacion_nl(nl: dict) -> dict:
         # La explicación sale de lo que realmente se hizo con cada renglón.
         metodos = {}
         for r in todos:
-            metodos[r.get("metodo_indice")] = metodos.get(r.get("metodo_indice"), 0) + 1
+            _m = str(r.get("metodo_indice") or "").split(". Periodo:")[0]
+            metodos[_m] = metodos.get(_m, 0) + 1
         texto_metodos = "; ".join(f"{n} renglón(es): {m}" for m, n in metodos.items())
-        meses = sorted({r.get("fecha", "")[:7] for r in todos})
-        return {
-            "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
-            "periodo_base": f"mes de cada renglón ({meses[0]} a {meses[-1]})",
+        meses = sorted({str(r.get("periodo_precio") or r.get("fecha", ""))[:7] for r in todos})
+        _viejas = sum(1 for r in todos if str(r.get("periodo_precio"))[:4] < str(r.get("fecha"))[:4])
+        return _acumulada({
+            "periodo_base": f"periodo de cada precio ({meses[0]} a {meses[-1]})",
             "valor_base": None,
             "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
             "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
@@ -179,17 +211,22 @@ def _inflacion_nl(nl: dict) -> dict:
             "justificacion": (
                 f"P.U. NL = mediana de las medianas por contrato (cada contrato pesa lo mismo). Se usaron "
                 f"{len(todos)} renglones técnicamente equivalentes (mismo objeto, función, material, unidad y "
-                f"especificaciones compatibles) de {nl.get('n_registros')} contrato(s) (OCID). Cada renglón se "
-                f"actualizó con el INPC de su mes ({texto_metodos}); después, mediana dentro de cada contrato y "
+                f"especificaciones compatibles) de {nl.get('n_registros')} contrato(s) (OCID). A cada renglón se le "
+                f"aplicó la inflación ACUMULADA (compuesta) desde su mes hasta {ajuste_inflacion.ETIQUETA_ACTUAL} "
+                f"({texto_metodos}). "
+                + (f"En {_viejas} renglón(es) el año del precio es el de la licitación (viene en su número), anterior "
+                   "a la fecha en que se publicó el registro; como el mes del concurso no está en la base, se usa "
+                   "julio de ese año. " if _viejas else "")
+                + "Después, mediana dentro de cada contrato y "
                 "mediana entre contratos. La base no trae número de partida, por eso varios renglones de un mismo "
                 "contrato cuentan como una sola observación. Factor = efectivo (P.U. actualizado ÷ mediana de "
                 "medianas original). Detalle y fórmulas en la hoja 'Inflación NL'."
             ),
-        }
+        }, None, todos)
     d = ajuste_inflacion.detalle_ajuste(
         nl.get("periodo_base_inflacion") or nl.get("anio_dato_mas_reciente"), nl.get("fecha_min"), nl.get("fecha_max"))
     d["justificacion"] = "APROXIMACIÓN (no se localizó el renglón de la mediana): " + d["justificacion"]
-    return d
+    return _acumulada(d, nl.get("periodo_base_inflacion") or nl.get("anio_dato_mas_reciente"))
 historico = cargar_historico()
 
 # Revisa una sola vez si hay una API key de IA configurada -- acepta
@@ -2106,8 +2143,11 @@ with st.sidebar:
 
     with st.expander("Opciones avanzadas"):
         ajustar_inflacion = st.checkbox(
-            "Ajustar precios viejos de NL por inflación (INPC)",
+            "Aplicar inflación acumulada a los precios con fecha (NL e histórico)",
             value=True,
+            help="Cada precio se lleva a hoy con la inflación acumulada (compuesta) desde su fecha: "
+                 "factor = índice del último mes ÷ índice del mes del precio. En Nuevo León la fecha del "
+                 "precio es el año de la licitación (viene en su número), no el día en que se publicó el registro.",
         )
         usar_ia = st.checkbox(
             "Revisión con IA (confirma que el concepto sea el mismo)",
@@ -2132,8 +2172,9 @@ with st.sidebar:
             "donde aparecen el concepto, la unidad y el precio."
         )
         st.caption(
-            f"INPC {'en vivo' if inpc_en_vivo else 'de respaldo'}: "
-            f"{ajuste_inflacion.ETIQUETA_ACTUAL}."
+            f"{'Índice de construcción (INEGI)' if ajuste_inflacion.INDICE_ES_CONSTRUCCION else 'INPC'} "
+            f"{'en vivo' if inpc_en_vivo else 'de respaldo'}: {ajuste_inflacion.ETIQUETA_ACTUAL}. "
+            "La inflación se aplica acumulada (compuesta) desde la fecha de cada precio."
         )
     revisar_todo_con_ia = True
     buscar_precios_web = busqueda_ia_disponible
@@ -3042,7 +3083,10 @@ if archivo is not None:
                         "historico": validacion.evaluar_fuente(
                             "historico", consulta_historico, concepto=concepto, precio=precio, unidad=unidad,
                             usar_ia=usar_ia,
-                            precio_referencia=(consulta_historico or {}).get("precio_mediana"),
+                            precio_referencia=(
+                                (consulta_historico or {}).get("precio_mediana_actualizada")
+                                if ajustar_inflacion and (consulta_historico or {}).get("precio_mediana_actualizada")
+                                else (consulta_historico or {}).get("precio_mediana")),
                             fecha_dato=(consulta_historico or {}).get("fecha_dato"),
                             region="RAGASA",
                         ),
@@ -3082,6 +3126,22 @@ if archivo is not None:
                         "unidad_ref": unidad, "region": "Ragasa",
                         "proveedores_ref": ", ".join((consulta_historico or {}).get("proveedores") or []),
                     })
+                    _regs_h = (consulta_historico or {}).get("registros_inflacion") or []
+                    if _regs_h and _ev_hist.get("precio_referencia"):
+                        _ev_hist["precio_original"] = (consulta_historico or {}).get("precio_mediana")
+                        _ev_hist["registros_historico"] = _regs_h
+                        if ajustar_inflacion and consulta_historico.get("precio_mediana"):
+                            _ev_hist["inflacion"] = _acumulada({
+                                "periodo_base": "mes en que se guardó cada compra",
+                                "valor_base": None,
+                                "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
+                                "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
+                                "factor": round(consulta_historico["precio_mediana_actualizada"]
+                                                / consulta_historico["precio_mediana"], 4),
+                                "justificacion": (
+                                    f"Mediana de {len(_regs_h)} compra(s) del histórico; cada una se actualizó con la "
+                                    "inflación acumulada desde el mes en que se guardó."),
+                            }, None, _regs_h)
                     if historico is None:
                         _ev_hist["motivo"] = "histórico no conectado"
                     elif _ev_hist["estado"] == validacion.SIN_DATO:
@@ -3096,7 +3156,9 @@ if archivo is not None:
                         "unidad_ref": nl.get("unidad"), "region": "Nuevo León",
                         "precio_original": nl.get("precio_mediana"),
                         "registros": nl.get("n_registros"),
-                        "periodo": (f"{str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]}"
+                        "periodo": ((f"licitaciones de {nl['periodo_precio_min'][:4]} a {nl['periodo_precio_max'][:4]}; "
+                                     if nl.get("periodo_precio_min") else "")
+                                    + f"registros publicados {str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]}"
                                     if nl.get("fecha_min") else None),
                         "inflacion": (_inflacion_nl(nl) if (_anio_nl and ajustar_inflacion) else None),
                         "tipo_registros": nl.get("tipo_registros"),
@@ -3131,6 +3193,10 @@ if archivo is not None:
                             ) if x
                         )
                         evaluaciones["ia"]["evidencia"] = busqueda_ia.get("fragmento") or busqueda_ia.get("nota")
+                    # Coherencia: se esperaría NL igual o más caro que CDMX.
+                    _coh = recomendacion.coherencia_nl_cdmx(evaluaciones)
+                    if _coh:
+                        evaluaciones["nl"]["coherencia"] = _coh
                     final = validacion.resultado_final(
                         evaluaciones, precio, renglon.get("cantidad")
                     )
@@ -3386,7 +3452,152 @@ if archivo is not None:
                             f"{icono} {e(validacion.dictamen_texto(ev))} {pct:+.1f}%<br>"
                             f"<small>{'+' if dif >= 0 else '-'}${abs(dif):,.2f} por unidad<br>"
                             f"{simple}{'' if validada else ' · falta confirmar'}<br>"
-                            f"Fuente: {e(validacion.confiabilidad_fuente(ev).split(' (')[0].lower())}</small>")
+                            f"Fuente: {e(validacion.confiabilidad_fuente(ev).split(' (')[0].lower())}"
+                            + (f"<br>Incluye inflación acumulada +{ev['inflacion']['acumulada_pct']:.1f}%"
+                               if (ev.get("inflacion") or {}).get("acumulada_pct") else "")
+                            + (f"<br>⚠ {abs(ev['coherencia']['brecha_pct']):.0f}% debajo de CDMX: úsala como piso"
+                               if ev.get("coherencia") else "")
+                            + "</small>")
+
+                # ---- Detalle al hacer clic en un recuadro (sin recargar) ----
+                def _kv(pares):
+                    filas_ = "".join(
+                        f"<tr><th>{_html.escape(str(k), quote=False)}</th><td>{val}</td></tr>"
+                        for k, val in pares if val not in (None, "", "—"))
+                    return f'<table class="kv">{filas_}</table>' if filas_ else ""
+
+                def _detalle_fuente(ev, f, nombre_fuente):
+                    def e(x):
+                        return _html.escape(str(x), quote=False)
+                    concepto = f.get("Concepto")
+                    precio_c = f.get("Precio cotizado")
+                    simple = validacion.estado_simple(ev)
+                    evid = validacion.evidencia(ev, concepto)
+                    inf = ev.get("inflacion") or {}
+                    partes = [f'<div class="pt">{e(nombre_fuente)} · {e(str(concepto)[:110])}</div>']
+                    # --- Por qué este color ---
+                    if validacion.cuenta_filtro(ev):
+                        pct, dif = ev.get("diferencia_pct") or 0, ev.get("diferencia_unitaria") or 0
+                        regla = ("más de +5 % arriba de la referencia = caro (rojo)" if ev["clasificacion"] == "ALTO"
+                                 else "más de 5 % abajo de la referencia = barato (verde)" if ev["clasificacion"] == "BAJO"
+                                 else "dentro de ±5 % de la referencia = en precio (amarillo)")
+                        porque = (
+                            f"Tu precio <b>{_dinero(precio_c)}</b> contra la referencia <b>{_dinero(ev['precio_referencia'])}</b> "
+                            f"= <b>{pct:+.1f} %</b> ({'+' if dif >= 0 else '-'}${abs(dif):,.2f} por unidad). Regla: {regla}.")
+                        if simple != "Validada":
+                            porque += (" Dice «posiblemente» y el color es claro porque la referencia es <b>orientativa</b>: "
+                                       f"falta confirmar {e(evid['Falta confirmar'] or 'la especificación')}.")
+                        else:
+                            porque += " Color fuerte: la referencia está <b>validada</b>."
+                    else:
+                        porque = (f"Gris: <b>{e(simple)}</b>; no entra al resultado ni a los colores. "
+                                  f"{e(_motivo_corto(ev)) if simple == 'Sin dato' else e(evid['Motivo'])}")
+                    partes.append(f'<div class="ps">Por qué este color</div><div>{porque}</div>')
+                    if ev.get("coherencia"):
+                        partes.append(f'<div class="pa">⚠ {e(ev["coherencia"]["texto"])}</div>')
+                    # --- De dónde sale el dato ---
+                    enlace = evid.get("Enlace")
+                    partes.append('<div class="ps">De dónde sale el dato</div>' + _kv([
+                        ("Fuente / documento", e(evid["Documento / fuente"])),
+                        ("Enlace", f'<a href="{_html.escape(str(enlace))}" target="_blank">{e(str(enlace)[:80])}</a>'
+                         if enlace else ""),
+                        ("Código", e(evid["Código"])), ("Página", e(evid["Página"])), ("Región", e(evid["Región"])),
+                        ("Concepto de la referencia", e(evid["Descripción completa de la referencia"])),
+                        ("Unidad de la referencia", e(evid["Unidad de la referencia"])),
+                        ("Qué incluye el precio", e(evid["Qué incluye el precio"])),
+                        ("Fecha / periodo del precio", e(evid["Fecha / periodo del precio"])),
+                        ("Fecha de consulta", e(evid["Fecha de consulta"])),
+                        ("Verificación", e(evid["Verificación"])),
+                        ("Confiabilidad de la fuente", e(evid["Confiabilidad de la fuente"])),
+                        ("Estado de la búsqueda", e(evid["Estado de la búsqueda"])),
+                        ("Revisión con IA", e(evid["Revisión IA"])),
+                        ("Frase de evidencia", e(str(evid["Evidencia (frase)"])[:400])),
+                        ("Referencias rechazadas", e(evid["Referencias rechazadas"])),
+                    ]))
+                    # --- Inflación acumulada ---
+                    if inf:
+                        tramos = "".join(
+                            f"<tr><td>{e(t['de'])} → {e(t['a'])}</td><td>{t['inflacion_pct']:+.2f} %</td>"
+                            f"<td>{t['acumulada_pct']:+.2f} %</td></tr>" for t in (inf.get("tramos") or []))
+                        partes.append(
+                            '<div class="ps">Inflación acumulada aplicada</div>' + _kv([
+                                ("Precio original", _dinero(ev.get("precio_original"))),
+                                ("Precio actualizado (el que se compara)", f"<b>{_dinero(ev.get('precio_referencia'))}</b>"),
+                                ("Inflación acumulada (efectiva)", (f"<b>+{inf['acumulada_pct']:.1f} %</b> (factor {inf.get('factor')})"
+                                                         if inf.get("acumulada_pct") is not None else "")),
+                                ("Por precio", e(inf.get("acumulada_rango") or "")),
+                                ("Periodo", e(f"{inf.get('periodo_base')} → {inf.get('periodo_final')}")),
+                                ("Índice", e(inf.get("indice"))),
+                            ])
+                            + (f'<table class="mini"><tr><th>Tramo (desde {e(inf.get("tramos_desde"))})</th>'
+                               f'<th>Inflación del tramo</th><th>Acumulada</th></tr>{tramos}</table>'
+                               '<div class="pn">La acumulada se compone (se multiplica año con año); no es la suma.</div>'
+                               if tramos else "")
+                            + f'<div class="pn">{e(inf.get("justificacion") or "")}</div>')
+                    # --- Contratos / compras usados ---
+                    todos = ev.get("registros_todos") or []
+                    if todos:
+                        grupos = {}
+                        for r in todos:
+                            grupos.setdefault(str(r.get("ocid") or r.get("licitacion")), []).append(r)
+                        filas_c = []
+                        for k_, g in sorted(grupos.items(), key=lambda kv: pd.Series(
+                                [x["precio_actualizado"] for x in kv[1]]).median()):
+                            orig = float(pd.Series([x["precio_original"] for x in g]).median())
+                            act = float(pd.Series([x["precio_actualizado"] for x in g]).median())
+                            filas_c.append(
+                                f"<tr><td>{e(k_.replace('ocds-7wj9x5-', ''))}</td><td>{e(g[0].get('anio_licitacion') or '')}</td>"
+                                f"<td>{len(g)}</td><td>${orig:,.2f}</td>"
+                                f"<td>+{g[0].get('inflacion_acumulada_pct', 0):.1f} %</td><td><b>${act:,.2f}</b></td></tr>")
+                        partes.append(
+                            f'<div class="ps">Contratos usados ({len(grupos)}; {len(todos)} renglones)</div>'
+                            '<table class="mini"><tr><th>Contrato</th><th>Año</th><th>Renglones</th><th>Mediana original</th>'
+                            '<th>Inflación acumulada</th><th>Mediana actualizada</th></tr>'
+                            + "".join(filas_c[:12]) + "</table>"
+                            + (f'<div class="pn">… y {len(filas_c) - 12} contrato(s) más en el Excel.</div>'
+                               if len(filas_c) > 12 else "")
+                            + f'<div class="pn">P.U. Nuevo León = mediana de estas medianas por contrato = '
+                              f'<b>{_dinero(ev.get("precio_referencia"))}</b> (no es un promedio). Cada renglón, con su '
+                              "índice y su factor, está en la hoja «Inflación NL» del Excel.</div>")
+                    regs_h = ev.get("registros_historico") or []
+                    if regs_h:
+                        partes.append(
+                            f'<div class="ps">Compras del histórico usadas ({len(regs_h)})</div>'
+                            '<table class="mini"><tr><th>Fecha</th><th>Proveedor</th><th>Proyecto</th><th>Precio</th>'
+                            '<th>Inflación acumulada</th><th>Actualizado</th></tr>' + "".join(
+                                f"<tr><td>{e(r['fecha'])}</td><td>{e(r['proveedor'])}</td><td>{e(r['proyecto'])}</td>"
+                                f"<td>${r['precio_original']:,.2f}</td><td>+{r['inflacion_acumulada_pct']:.1f} %</td>"
+                                f"<td><b>${r['precio_actualizado']:,.2f}</b></td></tr>" for r in regs_h[:12])
+                            + "</table>")
+                    return "".join(partes)
+
+                def _detalle_resultado(f):
+                    def e(x):
+                        return _html.escape(str(x), quote=False)
+                    rf = f["_filtros"]
+                    lineas = []
+                    for k, (clave, nombre) in enumerate(_FUENTES, 1):
+                        ev = f["_evaluaciones"][clave]
+                        if validacion.cuenta_filtro(ev):
+                            txt = (f"{e(validacion.dictamen_texto(ev))} {ev.get('diferencia_pct') or 0:+.1f} % "
+                                   f"(referencia {_dinero(ev['precio_referencia'])}) · {validacion.estado_simple(ev).lower()}")
+                        else:
+                            txt = f"no cuenta: {e(validacion.estado_simple(ev).lower())}"
+                        lineas.append((f"{k}. {nombre}", txt))
+                    c = rf["conteo"]
+                    return (
+                        f'<div class="pt">Resultado · {e(str(f.get("Concepto"))[:110])}</div>'
+                        f'<div class="ps">Cómo se obtiene</div><div><b>{e(rf["texto_plano"])}</b>. Se cuentan los filtros que '
+                        f'sí tienen un concepto comparable: {c.get("ALTO", 0)} caro, {c.get("EN MERCADO", 0)} en precio, '
+                        f'{c.get("BAJO", 0)} barato. Gana la mayoría; si empatan dice «No coinciden». No se promedian precios. '
+                        f'{e(rf["detalle"])}{"" if rf["validados"] or not rf["n"] else ": sin referencia validada el resultado no es concluyente"}.</div>'
+                        '<div class="ps">Qué dijo cada filtro</div>' + _kv(lineas)
+                        + '<div class="pn">Haz clic en el recuadro de cada filtro para ver de dónde sale su precio.</div>')
+
+                def _td_clic(estilo, visible, detalle, extra_td=""):
+                    return (f'<td class="clic" style="{estilo}"{extra_td}><details name="cmpdet"><summary>{visible}'
+                            '<span class="x">✕ Cerrar</span></summary>'
+                            f'<div class="pop">{detalle}</div></details></td>')
 
                 st.markdown("**Los 4 filtros por partida**")
                 _cab = "".join(f"<th>{n}</th>" for n in ("Concepto", "Cantidad", "Precio cotizado")) + "".join(
@@ -3400,30 +3611,97 @@ if archivo is not None:
                     ]
                     for clave, _ in _FUENTES:
                         _est, _txt = _celda_fuente(f["_evaluaciones"][clave], f.get("Concepto"))
-                        _tds.append(f'<td style="{_est}">{_txt}</td>')
+                        _nom = next(f"{k}. {n}" for k, (c_, n) in enumerate(_FUENTES, 1) if c_ == clave)
+                        _tds.append(_td_clic(_est, _txt, _detalle_fuente(f["_evaluaciones"][clave], f, _nom)))
                     _rf = f["_filtros"]
                     _fondo_r = {"ALTO": "#fde4e4", "BAJO": "#e3f4e7", "EN MERCADO": "#fff6d6",
                                 "MIXTO": "#fdebd3"}.get(_rf["clave"], "#f2f4f7")
-                    _tds.append(f'<td style="background:{_fondo_r};font-weight:600">{_rf["texto"]}'
-                                f'<br><small style="font-weight:400">{_rf["detalle"]}'
-                                f'{"" if _rf["validados"] or not _rf["n"] else " · no concluyente"}</small></td>')
+                    _tds.append(_td_clic(
+                        f"background:{_fondo_r};font-weight:600",
+                        f'{_rf["texto"]}<br><small style="font-weight:400">{_rf["detalle"]}'
+                        f'{"" if _rf["validados"] or not _rf["n"] else " · no concluyente"}</small>',
+                        _detalle_resultado(f)))
                     _filas_html.append("<tr>" + "".join(_tds) + "</tr>")
                 st.markdown(
                     "<style>.cmp{width:100%;border-collapse:collapse;font-size:0.82rem}"
                     ".cmp th{background:#1f3864;color:#fff;padding:6px;text-align:left;white-space:nowrap}"
                     ".cmp td{border:1px solid #d0d5dd;padding:6px;vertical-align:top}"
-                    ".cmp small{opacity:.85}</style>"
+                    ".cmp small{opacity:.85}"
+                    ".cmp td.clic{padding:0;cursor:pointer;height:1px}"
+                    "@supports (-moz-appearance:none){.cmp td.clic{height:100%}}"
+                    ".cmp td.clic>details{height:100%}"
+                    ".cmp td.clic>details>summary{list-style:none;display:block;padding:6px;height:100%;"
+                    "box-sizing:border-box}"
+                    ".cmp td.clic>details>summary::-webkit-details-marker{display:none}"
+                    ".cmp td.clic:hover{box-shadow:inset 0 0 0 2px #1f3864}"
+                    ".cmp details[open]>summary{box-shadow:inset 0 0 0 3px #1f3864}"
+                    ".cmp details[open]>summary::before{content:'';position:fixed;inset:0;background:rgba(16,24,40,.45);"
+                    "z-index:999990;cursor:default}"
+                    ".cmp summary .x{display:none}"
+                    ".cmp details[open]>summary .x{display:block;position:fixed;z-index:999992;top:calc(7vh + 12px);"
+                    "left:calc(50% + min(390px,47vw) - 96px);background:#1f3864;color:#fff;border-radius:6px;"
+                    "padding:4px 10px;font-weight:600;font-size:.8rem}"
+                    ".cmp .pop{position:fixed;z-index:999991;top:7vh;left:50%;transform:translateX(-50%);"
+                    "width:min(780px,94vw);max-height:86vh;overflow:auto;background:#fff;color:#101828;"
+                    "border-radius:10px;padding:18px 22px 20px;box-shadow:0 20px 50px rgba(0,0,0,.35);"
+                    "font-weight:400;font-size:.84rem;line-height:1.45;cursor:auto;text-align:left}"
+                    ".cmp .pop .pt{font-size:1rem;font-weight:700;color:#1f3864;padding-right:96px;margin-bottom:6px}"
+                    ".cmp .pop .ps{font-weight:700;color:#1f3864;border-bottom:1px solid #d0d5dd;margin:14px 0 6px}"
+                    ".cmp .pop .pn{color:#475467;font-size:.78rem;margin-top:5px}"
+                    ".cmp .pop .pa{background:#fff4e5;border-left:4px solid #f79009;padding:6px 10px;margin-top:8px}"
+                    ".cmp .pop table{border-collapse:collapse;width:100%;font-size:.8rem}"
+                    ".cmp .pop table.kv th{background:none;color:#475467;font-weight:600;white-space:normal;"
+                    "width:32%;padding:3px 8px 3px 0;vertical-align:top;text-align:left;border:0}"
+                    ".cmp .pop table.kv td{border:0;padding:3px 0;word-break:break-word}"
+                    ".cmp .pop table.mini th{background:#eef2f8;color:#1f3864;padding:4px 6px;white-space:normal}"
+                    ".cmp .pop table.mini td{border:1px solid #e4e7ec;padding:3px 6px}"
+                    "</style>"
                     f'<div style="overflow-x:auto"><table class="cmp"><tr>{_cab}</tr>{"".join(_filas_html)}</table></div>',
                     unsafe_allow_html=True,
                 )
-                st.caption("Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
+                st.caption("👆 Haz clic en cualquier recuadro de color (o en Resultado) para ver de dónde sale el dato, "
+                           "toda la información que se usó y por qué quedó en ese color. "
+                           "Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
                            "criterio operativo de la app) · 🟢 barato · gris = no se puede comparar. «Posiblemente» = "
                            "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
                            "filtros coinciden y cuántos están validados; no promedia precios. Precios antes de IVA: "
                            + ("se usa el subtotal sin IVA de la cotización." if metadatos.get("iva_en_documento") else
                               "la cotización no indica IVA; se supone que sus precios son antes de IVA (por confirmar con el proveedor)."))
 
-                # ---------------- 3. Acción principal ----------------
+                # ---------------- 3. Dónde enfocarte para negociar ----------------
+                _reco = recomendacion.prioridades(filas, revision_cant)
+                _foco = _reco["foco"][:5]
+                _texto_ia = None
+                if _foco:
+                    _lis = "".join(
+                        f"<li><b>{_html.escape(it['nombre'], quote=False)}</b> · ${it['importe']:,.0f} "
+                        f"({it['peso_pct']:.0f} % del total) — {_html.escape(it['texto'], quote=False)}</li>"
+                        for it in _foco)
+                    if usar_ia and ia_disponible:
+                        _texto_ia = recomendacion.redaccion_ia_con_cache(
+                            _reco, lambda prompt: revision_ia._llamar_ia_con_respaldo(prompt, max_tokens=400)[0])
+                    # Bloque HTML puro y "$" como entidad: si no, Streamlit
+                    # interpreta $...$ como fórmula matemática.
+                    st.markdown(
+                        ('<div style="font-size:0.88rem"><div style="font-size:1rem;font-weight:700;margin-bottom:4px">'
+                         "Dónde enfocarte para negociar</div>"
+                         f'{_html.escape(_reco["resumen"], quote=False)}'
+                         f'<ol style="margin:4px 0 4px 0">{_lis}</ol>'
+                         + (f'<div style="background:#eef2f8;border-left:4px solid #1f3864;padding:6px 10px">'
+                            f'<b>Recomendación de la IA:</b> {_html.escape(_texto_ia, quote=False)}</div>'
+                            if _texto_ia else "")
+                         + "</div>").replace("$", "&#36;"),
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        "Orden: por el dinero en juego de cada partida = (tu precio − precio de referencia) × cantidad, "
+                        "por separado para cada filtro (se muestra el rango, no un promedio), más las cantidades por "
+                        "aclarar. «Posiblemente» = referencia orientativa. "
+                        + ("La IA solo redacta estos mismos datos; no agrega precios."
+                           if _texto_ia else "Recomendación calculada con las reglas de la app"
+                           + (" (la IA no respondió)." if usar_ia and ia_disponible else ".")))
+
+                # ---------------- 4. Acción principal ----------------
                 def _nombre_corto(concepto):
                     palabras = re.sub(r"[^\wÁÉÍÓÚÑáéíóúñ ]", " ", str(concepto)).split()
                     return " ".join(palabras[:1]).lower() if palabras else "partida"
@@ -3506,7 +3784,7 @@ if archivo is not None:
                     data=exportar_revision.generar_excel(
                         tabla.to_dict("records"), proveedor=proveedor, proyecto=proyecto,
                         revision_cantidades=revision_cant, configuracion=configuracion_ia,
-                        datos_mercado=datos_mdo,
+                        datos_mercado=datos_mdo, recomendacion={**_reco, "texto_ia": _texto_ia},
                     ),
                     file_name=f"revision_{nombre_proveedor}_{nombre_proyecto}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

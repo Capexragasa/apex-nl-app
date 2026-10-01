@@ -849,8 +849,16 @@ def evidencia(ev: dict, concepto: str) -> dict:
         "Periodo final": inf.get("periodo_final", ""),
         "Valor final": inf.get("valor_final"),
         "Factor": inf.get("factor"),
+        "Inflación acumulada aplicada": (
+            (f"+{inf['acumulada_pct']:.1f} % efectiva" if inf.get("acumulada_pct") is not None else "")
+            + (f"; por renglón {inf['acumulada_rango']}" if inf.get("acumulada_rango") else "")
+            + (f". Desglose desde {inf.get('tramos_desde')}: " + " × ".join(
+                f"{t['a']} {t['inflacion_pct']:+.2f} %" for t in inf["tramos"])
+               + f" = +{inf.get('tramos_acumulada_pct'):.2f} % acumulado (se multiplica, no se suma)"
+               if inf.get("tramos") else "")) if inf else "",
         "Precio usado (actualizado)": ev.get("precio_referencia"),
         "Justificación del periodo base": inf.get("justificacion", ""),
+        "Aviso de coherencia": (ev.get("coherencia") or {}).get("texto", ""),
         "Nota de inflación": ("el ajuste por inflación no confirma vigencia comercial ni equivalencia técnica"
                               if inf else ""),
         "Registros de origen": (

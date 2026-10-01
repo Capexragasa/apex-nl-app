@@ -30,6 +30,7 @@ try:
 except ImportError:  # el servidor aún no instala requirements.txt
     XLSXWRITER_DISPONIBLE = False
 
+import ajuste_inflacion as _infl
 import validacion_referencias as v
 
 FUENTES = ("historico", "nl", "cdmx", "ia")
@@ -77,7 +78,7 @@ def _clasif(precio, ref):
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                   revision_cantidades: dict | None = None, configuracion: str = "",
-                  datos_mercado: dict | None = None) -> bytes:
+                  datos_mercado: dict | None = None, recomendacion: dict | None = None) -> bytes:
     if not XLSXWRITER_DISPONIBLE:
         import exportar_revision_respaldo
         return exportar_revision_respaldo.generar_excel(filas, proveedor=proveedor, proyecto=proyecto)
@@ -666,22 +667,25 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         wi = wb.add_worksheet("Inflación NL")
         cab_i = ["#", "Concepto cotizado", "Fila en 'Precios Contratados (real)'", "OCID", "Licitación",
                  "Dependencia", "Tipo", "Concepto del contrato", "Fecha", "Precio original", "Mes del índice",
-                 "INPC base", "Cómo se obtuvo el INPC base", "Mes final", "INPC final", "Factor (final ÷ base)",
-                 "Precio actualizado", "Contrato (OCID)", "Mediana del contrato", "P.U. NL de la partida"]
+                 "Índice base", "Cómo se obtuvo el índice base", "Mes final", "Índice final", "Factor (final ÷ base)",
+                 "Precio actualizado", "Contrato (OCID)", "Mediana del contrato", "P.U. NL de la partida",
+                 "Inflación acumulada del renglón"]
         wi.merge_range(0, 0, 0, len(cab_i) - 1, "Actualización por inflación de cada renglón de Nuevo León", f_titulo)
         wi.set_row(0, 26)
         wi.write(1, 0, "Método: (1) solo renglones técnicamente equivalentes a la partida (misma unidad, mismo objeto, "
-                       "función, material y especificaciones compatibles); (2) cada renglón se actualiza con el INPC de "
-                       "su mes; (3) mediana de los renglones de cada contrato (OCID), porque la base no trae el número "
+                       "función, material y especificaciones compatibles); (2) a cada renglón se le aplica la inflación "
+                       "ACUMULADA (compuesta) desde su mes hasta el último mes publicado: factor = índice final ÷ índice "
+                       "base (columna U = factor − 1); (3) mediana de los renglones de cada contrato (OCID), porque la base no trae el número "
                        "de partida; (4) P.U. NL = mediana de las medianas por contrato: cada contrato pesa lo mismo. "
                        "Las columnas P a T son fórmulas: si cambias un precio o un índice, el P.U. de 'Por fuente' y "
-                       "del Resumen se recalcula.", f_sub)
-        wi.set_row(1, 45)
+                       "del Resumen se recalcula. Índice usado: " + _infl.INDICE_NOMBRE + ".", f_sub)
+        wi.set_row(1, 58)
         for c, t in enumerate(cab_i):
             wi.write(3, c, t, f_cab)
         wi.set_row(3, 30)
         f_ind = fmt(num_format="0.000")
         f_fac = fmt(num_format="0.000000")
+        f_pct_i = fmt(num_format="+0.00%;-0.00%", align="center")
         # bloques: partida -> lista de (fila_excel, contrato)
         bloques = {}
         for k, (i_f, f, r, contrato) in enumerate(plan_infl):
@@ -702,6 +706,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wi.write_formula(fila, 15, f"=O{R}/L{R}", f_fac, r["factor"])
             wi.write_formula(fila, 16, f"=J{R}*P{R}", f_mon, r["precio_actualizado"])
             wi.write(fila, 17, contrato, f_centro)
+            wi.write_formula(fila, 20, f"=P{R}-1", f_pct_i, r["factor"] - 1)
             # Mediana del contrato: solo en el primer renglón de cada contrato.
             filas_contrato = [fx for fx, cx in bloques[i_f] if cx == contrato]
             if R == filas_contrato[0]:
@@ -714,12 +719,90 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                 ev_nl = (f.get("_evaluaciones") or {}).get("nl", {})
                 wi.write_formula(fila, 19, f"=MEDIAN(S{filas_partida[0]}:S{filas_partida[-1]})", f_ref.get(
                     "O_" + (ev_nl.get("clasificacion") or ""), f_mon), ev_nl.get("precio_referencia") or 0)
-        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30, 14, 14]):
+        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30, 14, 14, 14]):
             wi.set_column(c, c, ancho)
+        # Desglose año por año de la inflación acumulada (del renglón más
+        # antiguo usado): el producto de los tramos es el factor.
+        try:
+            mes_viejo = min(str(r.get("fecha"))[:7] for (_i, _f, r, _c) in plan_infl)
+            desg = _infl.desglose_acumulado(mes_viejo)
+        except Exception:
+            desg = None
+        if desg and desg.get("tramos"):
+            c0 = 22
+            wi.merge_range(3, c0, 3, c0 + 5, f"Inflación acumulada año por año desde {desg['base']} "
+                                             "(renglón más antiguo usado)", f_cab)
+            for j, t in enumerate(["De", "A", "Índice inicial", "Índice final", "Inflación del tramo",
+                                   "Inflación acumulada"]):
+                wi.write(4, c0 + j, t, f_cab)
+            from xlsxwriter.utility import xl_rowcol_to_cell as _celda
+            primera = 5
+            for j, t in enumerate(desg["tramos"]):
+                fr = primera + j
+                wi.write(fr, c0, t["de"], f_centro)
+                wi.write(fr, c0 + 1, t["a"], f_centro)
+                wi.write_number(fr, c0 + 2, t["valor_de"], f_ind)
+                wi.write_number(fr, c0 + 3, t["valor_a"], f_ind)
+                wi.write_formula(fr, c0 + 4, f"={_celda(fr, c0 + 3)}/{_celda(fr, c0 + 2)}-1", f_pct_i,
+                                 t["valor_a"] / t["valor_de"] - 1)
+                wi.write_formula(fr, c0 + 5, f"={_celda(fr, c0 + 3)}/{_celda(primera, c0 + 2, True, True)}-1", f_pct_i,
+                                 t["valor_a"] / desg["valor_base"] - 1)
+            wi.write(primera + len(desg["tramos"]), c0,
+                     "La inflación acumulada se compone (se multiplica año con año); no es la suma de los porcentajes.",
+                     f_sub)
+            for j, ancho in enumerate([16, 16, 12, 12, 14, 14]):
+                wi.set_column(c0 + j, c0 + j, ancho)
         wi.freeze_panes(4, 2)
         wi.hide_gridlines(2)
         wi.set_landscape()
         wi.fit_to_pages(1, 0)
+
+    # ==================================================================
+    # Hoja: Dónde negociar (prioridades por dinero en juego)
+    # ==================================================================
+    if recomendacion and recomendacion.get("items"):
+        wn = wb.add_worksheet("Dónde negociar")
+        cab_n = ["Prioridad", "#", "Concepto", "Importe cotizado", "% del total", "Qué hacer",
+                 "En juego por precio (mín.)", "En juego por precio (máx.)", "Cantidad por aclarar (máx.)",
+                 "Filtros que dicen caro", "Otros filtros", "Explicación"]
+        wn.merge_range(0, 0, 0, len(cab_n) - 1, "Dónde enfocarte para negociar", f_titulo)
+        wn.set_row(0, 26)
+        wn.merge_range(1, 0, 1, len(cab_n) - 1, recomendacion.get("resumen", "") + " Orden: dinero en juego = "
+                       "(P.U. cotizado − P.U. de referencia) × cantidad, por separado para cada filtro (rango, sin "
+                       "promediar), más las cantidades por aclarar. Con referencias orientativas el monto es un "
+                       "máximo posible, no un ahorro. Texto generado al exportar (no se recalcula).", f_sub)
+        wn.set_row(1, 44)
+        for c, t in enumerate(cab_n):
+            wn.write(3, c, t, f_cab)
+        wn.set_row(3, 30)
+        for k, it in enumerate(recomendacion["items"]):
+            fr = 4 + k
+            wn.write(fr, 0, k + 1, f_centro)
+            wn.write(fr, 1, it.get("partida"), f_centro)
+            wn.write(fr, 2, it.get("concepto"), f_txt)
+            wn.write_number(fr, 3, it.get("importe") or 0, f_mon)
+            wn.write_number(fr, 4, (it.get("peso_pct") or 0) / 100, fmt(num_format="0%", align="center"))
+            wn.write(fr, 5, it.get("nivel"), f_txt)
+            precio_ok = it.get("tipo") in ("precio", "precio_dudoso")
+            wn.write_number(fr, 6, it.get("monto_min") or 0 if precio_ok else 0, f_mon)
+            wn.write_number(fr, 7, it.get("monto_max") or 0 if precio_ok else 0, f_mon)
+            wn.write_number(fr, 8, (it.get("cantidad_por_aclarar") or {}).get("max", 0), f_mon)
+            wn.write(fr, 9, "; ".join(f"{c['fuente']} ${c['precio_ref']:,.2f} ({c['pct']:+.1f} %"
+                                      f"{'' if c['validada'] else ', orientativa'})" for c in it.get("caros", [])), f_txt)
+            wn.write(fr, 10, "; ".join(f"{o['fuente']} ${o['precio_ref']:,.2f} ({o['pct']:+.1f} %)"
+                                       for o in it.get("otros", [])), f_txt)
+            wn.write(fr, 11, it.get("texto"), f_txt)
+        if recomendacion.get("texto_ia"):
+            fr = 5 + len(recomendacion["items"])
+            wn.write(fr, 0, "Recomendación de la IA", f_bold)
+            wn.merge_range(fr, 1, fr, len(cab_n) - 1, recomendacion["texto_ia"], f_txt)
+            wn.set_row(fr, 60)
+        for c, ancho in enumerate([9, 5, 44, 15, 9, 26, 15, 15, 15, 34, 34, 80]):
+            wn.set_column(c, c, ancho)
+        wn.freeze_panes(4, 3)
+        wn.hide_gridlines(2)
+        wn.set_landscape()
+        wn.fit_to_pages(1, 0)
 
     # ==================================================================
     # Hoja 4: Metodología
@@ -757,6 +840,22 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                        "función, material, unidad y especificaciones compatibles). Cada renglón se actualiza con el "
                        "INPC de su mes. Detalle y fórmulas en 'Inflación NL'; el P.U. de 'Por fuente' y del Resumen "
                        "está vinculado a esa hoja."),
+        ("Inflación acumulada", "Los precios con fecha (contratos de Nuevo León y compras del histórico) se llevan a hoy con "
+                                "la inflación ACUMULADA (compuesta): factor = índice del último mes publicado ÷ índice "
+                                "del mes del precio. Índice: " + _infl.INDICE_NOMBRE + ". El desglose año por año está "
+                                "en 'Inflación NL'. El tabulador CDMX es edición 2026 y no se actualiza. Un índice "
+                                "general de precios no sigue por fuerza el costo de la construcción: por eso se avisa "
+                                "cuando Nuevo León queda por debajo de CDMX."),
+        ("Nuevo León: fecha del precio", "La columna 'fecha' de la base es el día en que el registro se publicó en datos "
+                                         "abiertos (decenas de miles de renglones comparten el mismo día). El año real "
+                                         "del precio es el de la licitación, que viene en su número (…-E126-2016). "
+                                         "Cuando es anterior al de publicación, la inflación se acumula desde julio de "
+                                         "ese año (mitad del año: el mes del concurso no está en la base)."),
+        ("Coherencia NL vs CDMX", "Si la referencia de Nuevo León queda más de 10 % por debajo de la de CDMX se avisa: "
+                                  "son contratos de obra pública de gran volumen y la especificación puede diferir; se "
+                                  "usa como piso de negociación, no como precio objetivo."),
+        ("Dónde negociar", "Las partidas se ordenan por dinero en juego = (P.U. cotizado − P.U. de referencia) × cantidad, "
+                           "por separado para cada filtro (rango, sin promediar), más las cantidades por aclarar."),
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),
         ("Histórico Ragasa", "Cotizaciones guardadas previamente en el histórico interno (Google Sheets)."),
     ]

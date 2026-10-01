@@ -288,6 +288,28 @@ class HistoricoGoogleSheets:
             'precio_max': float(grupo['precio_unitario'].max()),
             'fecha_dato': str(grupo['fecha_carga'].dropna().astype(str).max() or '') if 'fecha_carga' in grupo else '',
         }
+        # Inflación acumulada: cada compra del histórico se actualiza desde el
+        # mes en que se guardó hasta hoy y después se saca la mediana.
+        try:
+            import ajuste_inflacion as _inf
+            regs = []
+            for _, g in grupo.iterrows():
+                fecha = str(g.get('fecha_carga') or '')[:10]
+                precio_g = float(g['precio_unitario'])
+                fac = 1.0
+                if len(fecha) >= 7 and fecha[:4].isdigit():
+                    fac = max(1.0, _inf.NIVEL_ACTUAL / _inf.indice_base(fecha[:7])[0])
+                regs.append({'fecha': fecha, 'proveedor': str(g.get('proveedor') or ''),
+                             'proyecto': str(g.get('proyecto') or ''), 'concepto': str(g.get('concepto') or '')[:200],
+                             'precio_original': precio_g, 'factor': round(fac, 6),
+                             'inflacion_acumulada_pct': round((fac - 1) * 100, 2),
+                             'precio_actualizado': round(precio_g * fac, 2)})
+            if regs:
+                serie = pd.Series([r['precio_actualizado'] for r in regs])
+                out['precio_mediana_actualizada'] = round(float(serie.median()), 2)
+                out['registros_inflacion'] = regs
+        except Exception:
+            pass
         if precio_cotizado is not None and len(grupo) >= 2:
             # "EN MERCADO" = dentro de +/-5% de la mediana del clúster (ver
             # MARGEN_EN_MERCADO en comparador_multifuente_v2.py), igual que

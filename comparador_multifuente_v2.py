@@ -940,6 +940,32 @@ class ComparadorMultiFuente:
         except Exception:
             return None
 
+    @staticmethod
+    def periodo_de_precio(fecha, *identificadores):
+        """Mes ('AAAA-MM') desde el que se actualiza un precio de NL.
+
+        La columna 'fecha' de la base es la fecha en que el registro se
+        PUBLICÓ en datos abiertos (hay decenas de miles de renglones con el
+        mismo día), no la del concurso. El año real del precio viene en el
+        número de licitación / OCID (termina en el año: ...-E126-2016).
+        - Si el año de la licitación es anterior al de publicación, se usa
+          julio de ese año (mitad del año; el mes no está disponible).
+        - Si coincide, se usa el mes de publicación.
+        Devuelve (periodo, año_de_licitación, nota)."""
+        fecha = str(fecha or '')[:10]
+        anio_pub = int(fecha[:4]) if fecha[:4].isdigit() else None
+        anio_lic = None
+        for ident in identificadores:
+            m = re.findall(r'(?<!\d)(20[0-3]\d)(?!\d)', str(ident or ''))
+            if m:
+                anio_lic = int(m[-1])
+                break
+        if anio_lic and anio_pub and anio_lic < anio_pub:
+            return (f'{anio_lic}-07', anio_lic,
+                    f'año de la licitación ({anio_lic}) según su número; el registro se publicó en {fecha[:7]}. '
+                    'Mes del concurso no disponible: se usa julio (mitad del año)')
+        return fecha[:7], anio_lic or anio_pub, 'mes de publicación del registro (mismo año que la licitación)'
+
     def par_de_mediana(self, row):
         """Con número par de registros, la mediana es el promedio de dos
         renglones: los localiza (precio y fecha) para actualizar cada uno con
@@ -984,24 +1010,33 @@ class ComparadorMultiFuente:
         if ajustar_inflacion and not crudos.empty:
             # 1) Cada renglón con el INPC de SU mes (todo exportable).
             for idx_hoja, c in crudos.iterrows():
-                base, etiqueta, metodo_ind = _inflacion.indice_base(str(c['fecha'])[:7])
+                periodo_c, anio_lic, nota_periodo = self.periodo_de_precio(
+                    c['fecha'], c.get('licitacion_id'), c.get('ocid'))
+                base, etiqueta, metodo_ind = _inflacion.indice_base(periodo_c)
+                metodo_ind = f'{metodo_ind}. Periodo: {nota_periodo}'
                 fac = _inflacion.NIVEL_ACTUAL / base
                 registros_todos.append({
                     'fila_hoja': int(idx_hoja) + 2,   # fila en 'Precios Contratados (real)'
                     'ocid': c.get('ocid'), 'licitacion': c.get('licitacion_id'),
                     'dependencia': c.get('dependencia'), 'proyecto': c.get('proyecto'), 'tipo': c.get('fuente'),
                     'concepto': str(c.get('concepto'))[:200], 'fecha': str(c['fecha'])[:10],
+                    'anio_licitacion': anio_lic, 'periodo_precio': periodo_c,
                     'precio_original': float(c['precio_unitario']),
                     'indice_mes': etiqueta, 'indice_base': base, 'metodo_indice': metodo_ind,
                     'indice_final_mes': _inflacion.ETIQUETA_ACTUAL, 'indice_final': _inflacion.NIVEL_ACTUAL,
                     'factor': round(fac, 6), 'precio_actualizado': round(float(c['precio_unitario']) * fac, 2),
+                    # Inflación ACUMULADA (compuesta) del mes del renglón a hoy.
+                    'inflacion_acumulada_pct': round((fac - 1) * 100, 2),
                 })
             # 2) Un contrato (OCID) = una observación: la base no trae el
             #    identificador de partida, así que varios renglones del mismo
             #    contrato no se cuentan como contratos independientes.
             df_r = pd.DataFrame(registros_todos)
             df_r['contrato'] = df_r['ocid'].fillna(df_r['licitacion']).astype(str)
-            por_contrato = df_r.groupby('contrato').agg(actualizado=('precio_actualizado', 'median'),
+            # Con todos los decimales (igual que las fórmulas del Excel); el
+            # redondeo a centavos se hace al final.
+            df_r['_exacto'] = df_r['precio_original'] * _inflacion.NIVEL_ACTUAL / df_r['indice_base']
+            por_contrato = df_r.groupby('contrato').agg(actualizado=('_exacto', 'median'),
                                                         original=('precio_original', 'median'))
             n_contratos = int(len(por_contrato))
             serie = por_contrato['actualizado']
@@ -1017,12 +1052,13 @@ class ComparadorMultiFuente:
             # ES cada estadístico (mediana, p25, p75) y se usa SU mes.
             f_med = self.fecha_de_precio(row, row['precio_mediana'])
             if f_med:
-                base_med = f_med['fecha'][:7]
+                base_med = self.periodo_de_precio(f_med['fecha'], f_med.get('licitacion'), f_med.get('ocid'))[0]
                 mediana_uso = ajustar_precio(row['precio_mediana'], base_med)
                 f25 = self.fecha_de_precio(row, row['precio_p25'])
                 f75 = self.fecha_de_precio(row, row['precio_p75'])
-                p25_uso = ajustar_precio(row['precio_p25'], f25['fecha'][:7] if f25 else base_med)
-                p75_uso = ajustar_precio(row['precio_p75'], f75['fecha'][:7] if f75 else base_med)
+                _per = lambda x: self.periodo_de_precio(x['fecha'], x.get('licitacion'), x.get('ocid'))[0]
+                p25_uso = ajustar_precio(row['precio_p25'], _per(f25) if f25 else base_med)
+                p75_uso = ajustar_precio(row['precio_p75'], _per(f75) if f75 else base_med)
                 factor = factor_ajuste(base_med)
                 periodo_base = base_med
                 metodo_inflacion = f'mes del renglón que es la mediana ({base_med})'
@@ -1030,11 +1066,13 @@ class ComparadorMultiFuente:
             else:
                 par = self.par_de_mediana(row)
                 if par:
+                    _pers = [self.periodo_de_precio(r_['fecha'], r_.get('licitacion_id'), r_.get('ocid'))[0]
+                             for r_ in par]
                     ajust = [float(r_['precio_unitario']) * _inflacion.NIVEL_ACTUAL
-                             / _inflacion.indice_base(str(r_['fecha'])[:7])[0] for r_ in par]
+                             / _inflacion.indice_base(pp)[0] for r_, pp in zip(par, _pers)]
                     mediana_uso = round(sum(ajust) / 2, 2)
                     factor = mediana_uso / float(row['precio_mediana'])
-                    meses = sorted({str(r_['fecha'])[:7] for r_ in par})
+                    meses = sorted(set(_pers))
                     periodo_base = meses[0]
                     p25_uso = round(float(row['precio_p25']) * factor, 2)
                     p75_uso = round(float(row['precio_p75']) * factor, 2)
@@ -1074,7 +1112,11 @@ class ComparadorMultiFuente:
             'factor': factor, 'periodo_base': periodo_base, 'metodo': metodo_inflacion,
             'registros_usados': int(len(crudos)), 'registros_detalle': detalle_registros,
             'tipos': ', '.join(sorted(tipos)),
-            'anio_dato': (str(crudos['fecha'].astype(str).max())[:4] if grupo_ok else anio_dato),
+            # Año del precio = año de la licitación más reciente del grupo
+            # (no el de publicación del registro).
+            'anio_dato': (str(max(r['periodo_precio'] for r in registros_todos))[:4] if grupo_ok else anio_dato),
+            'periodo_precio_min': (min(r['periodo_precio'] for r in registros_todos) if grupo_ok else None),
+            'periodo_precio_max': (max(r['periodo_precio'] for r in registros_todos) if grupo_ok else None),
         }
 
     def cargar_ragasa(self, df_o_ruta):
@@ -1322,6 +1364,8 @@ class ComparadorMultiFuente:
             resultado['fuentes']['nl_historico'] = {
                 'match': row['concepto_homologado'], 'score': round(score, 1), 'unidad': row['unidad'],
                 'fecha_min': aj_nl['fecha_min'], 'fecha_max': aj_nl['fecha_max'],
+                'periodo_precio_min': aj_nl.get('periodo_precio_min'),
+                'periodo_precio_max': aj_nl.get('periodo_precio_max'),
                 'confianza': confianza,
                 'precio_min': float(row['precio_min']), 'precio_p25': float(row['precio_p25']),
                 'precio_mediana': aj_nl['mediana_original'], 'precio_p75': float(row['precio_p75']),
