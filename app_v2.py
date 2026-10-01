@@ -3151,7 +3151,9 @@ if archivo is not None:
                         "documento": ("SIASI, Secretaría de Movilidad y Planeación Urbana de NL, publicado en formato OCDS "
                                       "(fuente primaria: si.nl.gob.mx/transparencia/publicaciones). En la app: "
                                       "Base_Precios_Unitarios_NL_CDMX.xlsx, hoja 'Tabulador Homologado NL' "
-                                      f"(mediana de {nl.get('n_registros') or '—'} renglones; detalle en 'Precios Contratados (real)')"),
+                                      f"(mediana de las medianas de {nl.get('n_registros') or '—'} contrato(s), "
+                                      f"{nl.get('n_renglones') or nl.get('n_registros') or '—'} renglones; detalle en "
+                                      "'Precios Contratados (real)')"),
                         "url": "https://data.open-contracting.org/en/publication/32",
                         "unidad_ref": nl.get("unidad"), "region": "Nuevo León",
                         "precio_original": nl.get("precio_mediana"),
