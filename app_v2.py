@@ -3343,18 +3343,19 @@ if archivo is not None:
 
                 for f in filas:
                     f["_filtros"] = validacion.resultado_filtros(f["_evaluaciones"])
-                _n_caras = sum(1 for f in filas if f["_filtros"]["clave"] == validacion.ALTO)
+                _n_caras = sum(1 for f in filas if f["_filtros"]["conteo"].get(validacion.ALTO))
                 _monto_caro = sum(
                     max(0.0, f["_final"]["diferencia_importe"] or 0) for f in filas
-                    if f["_filtros"]["clave"] == validacion.ALTO
+                    if f["_filtros"]["conteo"].get(validacion.ALTO)
                 )
                 st.subheader("Resultado de la revisión")
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Total cotizado", f"${_importe_total:,.0f}")
                 m2.metric("Partidas revisadas", len(filas))
                 m3.metric(
-                    "Partidas caras según los filtros", f"{_n_caras} de {len(filas)}",
-                    help=(f"Diferencia contra la referencia: ${_monto_caro:,.0f}. "
+                    "Partidas con algún filtro en alto", f"{_n_caras} de {len(filas)}",
+                    help=("Partidas donde al menos un filtro marca rojo (precio arriba de la referencia). "
+                          f"Diferencia contra la referencia: ${_monto_caro:,.0f}. "
                           f"Oportunidad contra referencias validadas: ${_ahorro_respaldado:,.0f} (potencial; el ahorro real es el que se negocie)."),
                 )
 
@@ -3387,10 +3388,10 @@ if archivo is not None:
                 # presenta como validado.
                 import html as _html
                 _COLOR_CELDA = {
+                    # Solo dos colores: rojo = alto, verde = bajo. Fuerte =
+                    # validado; claro = posible (referencia orientativa).
                     (True, "ALTO"): ("#f3a5a5", "#5c1414"), (True, "BAJO"): ("#a8dbb4", "#0f3d21"),
-                    (True, "EN MERCADO"): ("#ffe08a", "#5c4300"),
                     (False, "ALTO"): ("#fde4e4", "#8a2b2b"), (False, "BAJO"): ("#e3f4e7", "#1f6b3a"),
-                    (False, "EN MERCADO"): ("#fff6d6", "#7a5d00"),
                 }
 
                 def _motivo_corto(ev):
@@ -3443,7 +3444,7 @@ if archivo is not None:
                                 f'<small>{_motivo_corto(ev)}</small></span>')
                     validada = simple == "Validada"
                     fondo, texto = _COLOR_CELDA.get((validada, ev.get("clasificacion")), ("#f2f4f7", "#344054"))
-                    icono = {"ALTO": "🔴", "EN MERCADO": "🟡", "BAJO": "🟢"}[ev["clasificacion"]]
+                    icono = {"ALTO": "🔴", "BAJO": "🟢"}.get(ev["clasificacion"], "🟢")
                     pct = ev.get("diferencia_pct")
                     dif = ev.get("diferencia_unitaria")
                     estilo = f"background:{fondo};color:{texto}" + (";font-weight:600" if validada else "")
@@ -3478,14 +3479,13 @@ if archivo is not None:
                     # --- Por qué este color ---
                     if validacion.cuenta_filtro(ev):
                         pct, dif = ev.get("diferencia_pct") or 0, ev.get("diferencia_unitaria") or 0
-                        regla = ("más de +5 % arriba de la referencia = caro (rojo)" if ev["clasificacion"] == "ALTO"
-                                 else "más de 5 % abajo de la referencia = barato (verde)" if ev["clasificacion"] == "BAJO"
-                                 else "dentro de ±5 % de la referencia = en precio (amarillo)")
+                        regla = ("arriba de la referencia = alto (rojo)" if ev["clasificacion"] == "ALTO"
+                                 else "igual o abajo de la referencia = bajo (verde)")
                         porque = (
                             f"Tu precio <b>{_dinero(precio_c)}</b> contra la referencia <b>{_dinero(ev['precio_referencia'])}</b> "
                             f"= <b>{pct:+.1f} %</b> ({'+' if dif >= 0 else '-'}${abs(dif):,.2f} por unidad). Regla: {regla}.")
                         if simple != "Validada":
-                            porque += (" Dice «posiblemente» y el color es claro porque la referencia es <b>orientativa</b>: "
+                            porque += (" Dice «posible» y el color es claro porque la referencia es <b>orientativa</b>: "
                                        f"falta confirmar {e(evid['Falta confirmar'] or 'la especificación')}.")
                         else:
                             porque += " Color fuerte: la referencia está <b>validada</b>."
@@ -3571,37 +3571,15 @@ if archivo is not None:
                             + "</table>")
                     return "".join(partes)
 
-                def _detalle_resultado(f):
-                    def e(x):
-                        return _html.escape(str(x), quote=False)
-                    rf = f["_filtros"]
-                    lineas = []
-                    for k, (clave, nombre) in enumerate(_FUENTES, 1):
-                        ev = f["_evaluaciones"][clave]
-                        if validacion.cuenta_filtro(ev):
-                            txt = (f"{e(validacion.dictamen_texto(ev))} {ev.get('diferencia_pct') or 0:+.1f} % "
-                                   f"(referencia {_dinero(ev['precio_referencia'])}) · {validacion.estado_simple(ev).lower()}")
-                        else:
-                            txt = f"no cuenta: {e(validacion.estado_simple(ev).lower())}"
-                        lineas.append((f"{k}. {nombre}", txt))
-                    c = rf["conteo"]
-                    return (
-                        f'<div class="pt">Resultado · {e(str(f.get("Concepto"))[:110])}</div>'
-                        f'<div class="ps">Cómo se obtiene</div><div><b>{e(rf["texto_plano"])}</b>. Se cuentan los filtros que '
-                        f'sí tienen un concepto comparable: {c.get("ALTO", 0)} caro, {c.get("EN MERCADO", 0)} en precio, '
-                        f'{c.get("BAJO", 0)} barato. Gana la mayoría; si empatan dice «No coinciden». No se promedian precios. '
-                        f'{e(rf["detalle"])}{"" if rf["validados"] or not rf["n"] else ": sin referencia validada el resultado no es concluyente"}.</div>'
-                        '<div class="ps">Qué dijo cada filtro</div>' + _kv(lineas)
-                        + '<div class="pn">Haz clic en el recuadro de cada filtro para ver de dónde sale su precio.</div>')
-
                 def _td_clic(estilo, visible, detalle, extra_td=""):
                     return (f'<td class="clic" style="{estilo}"{extra_td}><details name="cmpdet"><summary>{visible}'
                             '<span class="x">✕ Cerrar</span></summary>'
                             f'<div class="pop">{detalle}</div></details></td>')
 
-                st.markdown("**Los 4 filtros por partida**")
+                st.markdown("**Los 4 filtros por partida** · rojo = alto, verde = bajo · "
+                            "haz clic en un recuadro para ver de dónde sale el dato")
                 _cab = "".join(f"<th>{n}</th>" for n in ("Concepto", "Cantidad", "Precio cotizado")) + "".join(
-                    f"<th>{k}. {n}</th>" for k, (_, n) in enumerate(_FUENTES, 1)) + "<th>Resultado</th>"
+                    f"<th>{k}. {n}</th>" for k, (_, n) in enumerate(_FUENTES, 1))
                 _filas_html = []
                 for f in filas:
                     _tds = [
@@ -3613,14 +3591,6 @@ if archivo is not None:
                         _est, _txt = _celda_fuente(f["_evaluaciones"][clave], f.get("Concepto"))
                         _nom = next(f"{k}. {n}" for k, (c_, n) in enumerate(_FUENTES, 1) if c_ == clave)
                         _tds.append(_td_clic(_est, _txt, _detalle_fuente(f["_evaluaciones"][clave], f, _nom)))
-                    _rf = f["_filtros"]
-                    _fondo_r = {"ALTO": "#fde4e4", "BAJO": "#e3f4e7", "EN MERCADO": "#fff6d6",
-                                "MIXTO": "#fdebd3"}.get(_rf["clave"], "#f2f4f7")
-                    _tds.append(_td_clic(
-                        f"background:{_fondo_r};font-weight:600",
-                        f'{_rf["texto"]}<br><small style="font-weight:400">{_rf["detalle"]}'
-                        f'{"" if _rf["validados"] or not _rf["n"] else " · no concluyente"}</small>',
-                        _detalle_resultado(f)))
                     _filas_html.append("<tr>" + "".join(_tds) + "</tr>")
                 st.markdown(
                     "<style>.cmp{width:100%;border-collapse:collapse;font-size:0.82rem}"
@@ -3659,15 +3629,6 @@ if archivo is not None:
                     f'<div style="overflow-x:auto"><table class="cmp"><tr>{_cab}</tr>{"".join(_filas_html)}</table></div>',
                     unsafe_allow_html=True,
                 )
-                st.caption("👆 Haz clic en cualquier recuadro de color (o en Resultado) para ver de dónde sale el dato, "
-                           "toda la información que se usó y por qué quedó en ese color. "
-                           "Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
-                           "criterio operativo de la app) · 🟢 barato · gris = no se puede comparar. «Posiblemente» = "
-                           "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
-                           "filtros coinciden y cuántos están validados; no promedia precios. Precios antes de IVA: "
-                           + ("se usa el subtotal sin IVA de la cotización." if metadatos.get("iva_en_documento") else
-                              "la cotización no indica IVA; se supone que sus precios son antes de IVA (por confirmar con el proveedor)."))
-
                 # ---------------- 3. Dónde enfocarte para negociar ----------------
                 _reco = recomendacion.prioridades(filas, revision_cant)
                 _foco = _reco["foco"][:5]
@@ -3696,7 +3657,7 @@ if archivo is not None:
                     st.caption(
                         "Orden: por el dinero en juego de cada partida = (tu precio − precio de referencia) × cantidad, "
                         "por separado para cada filtro (se muestra el rango, no un promedio), más las cantidades por "
-                        "aclarar. «Posiblemente» = referencia orientativa. "
+                        "aclarar. «Posible» = referencia orientativa. "
                         + ("La IA solo redacta estos mismos datos; no agrega precios."
                            if _texto_ia else "Recomendación calculada con las reglas de la app"
                            + (" (la IA no respondió)." if usar_ia and ia_disponible else ".")))
@@ -3902,7 +3863,14 @@ if archivo is not None:
 
                     with _tabs_detalle[3]:
                         st.markdown(
-                            "- **Validada:** la IA confirma el concepto, el proveedor declara las especificaciones e "
+                            "- **Colores:** rojo = alto (tu precio está arriba de la referencia); verde = bajo (igual o "
+                            "abajo). Color fuerte y «Alto / Bajo» = referencia validada; color claro y «Posible alto / "
+                            "Posible bajo» = referencia orientativa; gris = no se puede comparar.\n"
+                            "- **IVA:** "
+                            + ("se usa el subtotal sin IVA de la cotización.\n" if metadatos.get("iva_en_documento") else
+                               "la cotización no indica IVA; se supone que sus precios son antes de IVA (por confirmar "
+                               "con el proveedor).\n")
+                            + "- **Validada:** la IA confirma el concepto, el proveedor declara las especificaciones e "
                             "inclusiones de la referencia (sección, espesor, f'c, refuerzo, condición de azotea) y el "
                             "precio es vigente (≤ 12 meses).\n"
                             "- **Orientativo:** hay un precio real de un concepto parecido, pero falta demostrar especificación, "
@@ -3910,7 +3878,7 @@ if archivo is not None:
                             "validar*, nunca como ahorro.\n"
                             "- **Rechazada:** la IA la rechaza, o el material, el elemento (p. ej. castillo vs. cerramiento), "
                             "la especificación o el alcance son distintos.\n"
-                            "- **Oportunidad validada:** diferencia contra una referencia validada con el cotizado más de 5 % arriba. Es potencial: el ahorro real es la reducción que se negocie o contrate.\n"
+                            "- **Oportunidad validada:** diferencia contra una referencia validada cuando el cotizado está arriba de ella. Es potencial: el ahorro real es la reducción que se negocie o contrate.\n"
                             "- **Sin promedios:** cada fuente se compara por separado; la referencia de negociación sigue la "
                             "prioridad Histórico Ragasa > Nuevo León > CDMX > IA.\n"
                             "- **Precios web:** la fecha del precio solo se registra si la fuente la indica; aparte se guarda "

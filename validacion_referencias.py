@@ -63,7 +63,7 @@ BAJO = "BAJO"
 MIXTO = "MIXTO"
 SIN_VALIDADA = "SIN DATOS SUFICIENTES"
 
-MARGEN_EN_MERCADO = 0.05          # ±5 % alrededor de la referencia
+MARGEN_EN_MERCADO = 0.0           # dos dictámenes: arriba de la referencia = alto; igual o abajo = bajo
 FACTOR_ESCALA = 5.0               # filtro de cifras extremas (NO demuestra equivalencia)
 VIGENCIA_MESES = 12               # un precio más viejo no demuestra precio vigente
 
@@ -82,11 +82,13 @@ def _plano(texto) -> str:
 
 
 def clasificar(precio: float, referencia: float, margen: float = MARGEN_EN_MERCADO) -> str:
-    if precio < referencia * (1 - margen):
-        return BAJO
+    # Solo dos dictámenes (rojo / verde): arriba de la referencia es ALTO;
+    # igual o por debajo, BAJO. Con margen > 0 habría una franja intermedia.
     if precio > referencia * (1 + margen):
         return ALTO
-    return EN_MERCADO
+    if margen and precio >= referencia * (1 - margen):
+        return EN_MERCADO
+    return BAJO
 
 
 def diferencia_pct(precio: float, referencia: float):
@@ -678,7 +680,7 @@ def resultado_final(evaluaciones: dict, precio: float, cantidad) -> dict:
 # ----------------------------------------------------------------------
 # Presentación común (pantalla, CSV y Excel): mismo texto en todos lados.
 # ----------------------------------------------------------------------
-_CLAS_TEXTO = {"ALTO": "caro", "EN MERCADO": "en precio", "BAJO": "barato"}
+_CLAS_TEXTO = {"ALTO": "alto", "EN MERCADO": "en precio", "BAJO": "bajo"}
 
 
 def estado_simple(ev: dict) -> str:
@@ -702,7 +704,7 @@ def dictamen_texto(ev: dict) -> str:
     if simple == "Validada" and clas:
         return clas[0].upper() + clas[1:]
     if simple == "Orientativa" and clas:
-        return f"Posiblemente {clas}"
+        return f"Posible {clas}"
     return simple
 
 
@@ -805,7 +807,7 @@ def resultado_filtros(evaluaciones: dict) -> dict:
     else:
         clave = ganadores[0]
         palabra = _CLAS_TEXTO[clave]
-        palabra = palabra[0].upper() + palabra[1:] if validados else f"Posiblemente {palabra}"
+        palabra = palabra[0].upper() + palabra[1:] if validados else f"Posible {palabra}"
         plano = f"{palabra} en {mayor} de {n} filtro{'s' if n > 1 else ''}"
         texto = f"{icono[clave]} {plano}"
     return {"clave": clave, "texto": texto, "texto_plano": plano, "detalle": detalle,

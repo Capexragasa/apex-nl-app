@@ -69,11 +69,7 @@ def _num(valor):
 def _clasif(precio, ref):
     if precio is None or not ref:
         return ""
-    if precio > ref * 1.05:
-        return "ALTO"
-    if precio < ref * 0.95:
-        return "BAJO"
-    return "EN MERCADO"
+    return "ALTO" if precio > ref else "BAJO"
 
 
 def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
@@ -157,12 +153,12 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # Colores que siguen al dictamen (fórmula): si cambian precios, índices
     # o estados, el color cambia junto con el texto.
     f_cf = {
-        "Caro": wb.add_format({"bg_color": "#F3A5A5", "font_color": "#5C1414", "bold": True}),
+        "Alto": wb.add_format({"bg_color": "#F3A5A5", "font_color": "#5C1414", "bold": True}),
         "En precio": wb.add_format({"bg_color": "#FFE08A", "font_color": "#5C4300", "bold": True}),
-        "Barato": wb.add_format({"bg_color": "#A8DBB4", "font_color": "#0F3D21", "bold": True}),
-        "Posiblemente caro": wb.add_format({"bg_color": "#FDE4E4", "font_color": "#8A2B2B", "italic": True}),
+        "Bajo": wb.add_format({"bg_color": "#A8DBB4", "font_color": "#0F3D21", "bold": True}),
+        "Posible alto": wb.add_format({"bg_color": "#FDE4E4", "font_color": "#8A2B2B", "italic": True}),
         "Posiblemente en precio": wb.add_format({"bg_color": "#FFF6D6", "font_color": "#7A5D00", "italic": True}),
-        "Posiblemente barato": wb.add_format({"bg_color": "#E3F4E7", "font_color": "#1F6B3A", "italic": True}),
+        "Posible bajo": wb.add_format({"bg_color": "#E3F4E7", "font_color": "#1F6B3A", "italic": True}),
         "Rechazada": wb.add_format({"font_color": "#98A2B3", "font_strikeout": True}),
         "No comparable": wb.add_format({"font_color": "#98A2B3", "font_strikeout": True}),
     }
@@ -267,24 +263,24 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         for x, c in reversed(list(zip(es_val, clase))):
             primera = f"IF({x},{c},{primera})"
         iguales = ",".join(f"OR(NOT({x}),{c}={primera})" for x, c in zip(es_val, clase))
-        nc = "+".join(f'(RIGHT({d},4)="caro")' for d in celdas_dict)
+        nc = "+".join(f'(RIGHT({d},4)="alto")' for d in celdas_dict)
         ne = "+".join(f'(RIGHT({d},9)="en precio")' for d in celdas_dict)
-        nb = "+".join(f'(RIGHT({d},6)="barato")' for d in celdas_dict)
+        nb = "+".join(f'(RIGHT({d},4)="bajo")' for d in celdas_dict)
         nt = f"(({nc})+({ne})+({nb}))"
         nv = "+".join(f'({e}="VALIDADA")' for e in celdas_est)
         sufijo = f'&" de "&{nt}&IF({nt}>1," filtros"," filtro")'
         def _pal(p):
-            return f'IF(({nv})>0,"{p[0].upper() + p[1:]}","Posiblemente {p}")'
+            return f'IF(({nv})>0,"{p[0].upper() + p[1:]}","Posible {p}")'
         f_res = (f'=IF({nt}=0,"Sin datos",'
-                 f'IF(AND(({nc})>({ne}),({nc})>({nb})),{_pal("caro")}&" en "&({nc}){sufijo},'
+                 f'IF(AND(({nc})>({ne}),({nc})>({nb})),{_pal("alto")}&" en "&({nc}){sufijo},'
                  f'IF(AND(({ne})>({nc}),({ne})>({nb})),{_pal("en precio")}&" en "&({ne}){sufijo},'
-                 f'IF(AND(({nb})>({nc}),({nb})>({ne})),{_pal("barato")}&" en "&({nb}){sufijo},'
-                 f'"No coinciden: "&MID(IF(({nc})>0,", "&({nc})&" caro","")&IF(({ne})>0,", "&({ne})&" en precio","")'
-                 f'&IF(({nb})>0,", "&({nb})&" barato",""),3,100)))))')
+                 f'IF(AND(({nb})>({nc}),({nb})>({ne})),{_pal("bajo")}&" en "&({nb}){sufijo},'
+                 f'"No coinciden: "&MID(IF(({nc})>0,", "&({nc})&" alto","")&IF(({ne})>0,", "&({ne})&" en precio","")'
+                 f'&IF(({nb})>0,", "&({nb})&" bajo",""),3,100)))))')
         rf = v.resultado_filtros(evs)
         texto_rf = rf["texto_plano"]
         ws.write_formula(r, c_fin, f_res, f_semaforo.get(rf["clave"] or "OTRO", f_semaforo["OTRO"]), texto_rf)
-        for palabra, color_f, color_t in (("caro", ROJO_F, ROJO_T), ("barato", VERDE_F, VERDE_T),
+        for palabra, color_f, color_t in (("alto", ROJO_F, ROJO_T), ("bajo", VERDE_F, VERDE_T),
                                           ("en precio", AMBAR_F, AMBAR_T)):
             ws.conditional_format(f"{xl_col_to_name(c_fin)}{R}", {
                 "type": "text", "criteria": "containing", "value": palabra + " en ",
@@ -320,7 +316,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ws.write_formula(
             r, c_fin + 6,
             f'=IF(AND({col_resp}{R}="VALIDADA",{col_neg}{R}<>""),'
-            f'IF(E{R}>{col_neg}{R}*1.05,(E{R}-{col_neg}{R})*D{R},0),0)',
+            f'IF(E{R}>{col_neg}{R},(E{R}-{col_neg}{R})*D{R},0),0)',
             f_mon, ahorro,
         )
         ws.write(r, c_fin + 7, fin.get("detalle") or "", f_txt)
@@ -338,11 +334,9 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     col_res = xl_col_to_name(c_fin)
     rng = f"{col_res}{fila0 + 1}:{col_res}{U}"
     conteos = [
-        ("Partidas caras (posible o validado)", f'=COUNTIF({rng},"*caro en*")',
+        ("Partidas altas (posible o validado)", f'=COUNTIF({rng},"*alto en*")',
          sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.ALTO)),
-        ("Partidas en precio", f'=COUNTIF({rng},"*en precio en*")',
-         sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.EN_MERCADO)),
-        ("Partidas baratas", f'=COUNTIF({rng},"*barato en*")',
+        ("Partidas bajas", f'=COUNTIF({rng},"*bajo en*")',
          sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.BAJO)),
         ("Filtros no coinciden", f'=COUNTIF({rng},"No coinciden*")',
          sum(1 for f in filas if v.resultado_filtros(f.get("_evaluaciones") or {})["clave"] == v.MIXTO)),
@@ -592,12 +586,12 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wf.write_formula(r, c0 + 2,
                              f'=IF(OR({cr}{R}="",{ce}{R}="RECHAZADA",{ce}{R}="SIN DATO",{ce}{R}="NO COMPARABLE"),"",D{R}/{cr}{R}-1)',
                              f_pct, pct)
-            clas = f'IF(D{R}>{cr}{R}*1.05,"caro",IF(D{R}<{cr}{R}*0.95,"barato","en precio"))'
-            clas_v = f'IF(D{R}>{cr}{R}*1.05,"Caro",IF(D{R}<{cr}{R}*0.95,"Barato","En precio"))'
+            clas = f'IF(D{R}>{cr}{R},"alto","bajo")'
+            clas_v = f'IF(D{R}>{cr}{R},"Alto","Bajo")'
             wf.write_formula(
                 r, c0 + 3,
                 f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin dato",IF({ce}{R}="RECHAZADA","Rechazada",'
-                f'IF({ce}{R}="NO COMPARABLE","No comparable",IF({ce}{R}="VALIDADA",{clas_v},"Posiblemente "&{clas}))))',
+                f'IF({ce}{R}="NO COMPARABLE","No comparable",IF({ce}{R}="VALIDADA",{clas_v},"Posible "&{clas}))))',
                 f_centro, v.dictamen_texto(ev))
             colorear_por_dictamen(wf, f"{cr}{R}:{xl_col_to_name(c0 + 3)}{R}", f"${xl_col_to_name(c0 + 3)}{R}")
             wf.write(r, c0 + 4, v.confiabilidad_fuente(ev), f_centro)
@@ -764,7 +758,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         wn = wb.add_worksheet("Dónde negociar")
         cab_n = ["Prioridad", "#", "Concepto", "Importe cotizado", "% del total", "Qué hacer",
                  "En juego por precio (mín.)", "En juego por precio (máx.)", "Cantidad por aclarar (máx.)",
-                 "Filtros que dicen caro", "Otros filtros", "Explicación"]
+                 "Filtros que dicen alto", "Otros filtros", "Explicación"]
         wn.merge_range(0, 0, 0, len(cab_n) - 1, "Dónde enfocarte para negociar", f_titulo)
         wn.set_row(0, 26)
         wn.merge_range(1, 0, 1, len(cab_n) - 1, recomendacion.get("resumen", "") + " Orden: dinero en juego = "
@@ -832,7 +826,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                        "fuente y frase verificadas puede quedar VALIDADO."),
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
                           "Histórico Ragasa > Nuevo León > CDMX > IA internet."),
-        ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen caro, en precio (±5 %) o barato; gana la mayoría y, "
+        ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen alto (arriba de la referencia) o bajo (igual o abajo); gana la mayoría y, "
                                        "si empatan, 'No coinciden' con el conteo de cada dictamen. No promedia precios. 'Respaldo' dice si "
                                        "hay al menos una referencia validada."),
         ("Nuevo León", "Mediana de las medianas por contrato (OCID): cada contrato pesa lo mismo. Dentro de cada "

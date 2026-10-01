@@ -768,10 +768,11 @@ def validar_compatibilidad_tecnica(
 
 
 def clasificar(precio: float, low: float, high: float) -> str:
-    if precio < low:
-        return 'BAJO'
+    # Dos dictámenes: arriba de la referencia = ALTO; igual o abajo = BAJO.
     if precio > high:
         return 'ALTO'
+    if precio < low or low == high:
+        return 'BAJO'
     return 'EN MERCADO'
 
 
@@ -781,7 +782,7 @@ def clasificar(precio: float, low: float, high: float) -> str:
 # historico): un solo numero, igual en las tres fuentes, mas facil de
 # explicar en una junta que "depende de que tan dispersos esten los
 # precios historicos de ese concepto".
-MARGEN_EN_MERCADO = 0.05
+MARGEN_EN_MERCADO = 0.0   # sin franja intermedia: solo alto / bajo
 
 
 def banda_en_mercado(precio_referencia: float, margen: float = MARGEN_EN_MERCADO):

@@ -25,6 +25,9 @@ NOMBRES = {"historico": "Histórico Ragasa", "nl": "Nuevo León", "cdmx": "CDMX"
 # Si la referencia de NL queda más de este porcentaje por debajo de la de
 # CDMX para la misma partida, se avisa (se esperaría lo contrario).
 UMBRAL_COHERENCIA = 0.10
+# Para decidir dónde enfocarse (no para el color): una diferencia menor a
+# este porcentaje se considera "prácticamente igual" y no se manda a negociar.
+MINIMO_MATERIAL_PCT = 1.0
 
 
 def _num(x):
@@ -85,8 +88,9 @@ def prioridades(filas: list, revision_cant: dict | None = None) -> dict:
         cantidad, precio = _num(f.get("Cantidad")), _num(f.get("Precio cotizado"))
         importe = cantidad * precio
         usados = [(k, e) for k, e in evs.items() if v.cuenta_filtro(e)]
-        caros = [(k, e) for k, e in usados if e.get("clasificacion") == v.ALTO]
-        otros = [(k, e) for k, e in usados if e.get("clasificacion") != v.ALTO]
+        caros = [(k, e) for k, e in usados if e.get("clasificacion") == v.ALTO
+                 and (e.get("diferencia_pct") or 0) >= MINIMO_MATERIAL_PCT]
+        otros = [(k, e) for k, e in usados if (k, e) not in caros]
         validado = any(e.get("estado") == v.VALIDADA for _, e in caros)
         montos = [max(0.0, (precio - e["precio_referencia"]) * cantidad) for _, e in caros]
         coher = coherencia_nl_cdmx(evs)
@@ -100,7 +104,8 @@ def prioridades(filas: list, revision_cant: dict | None = None) -> dict:
                        "pct": e.get("diferencia_pct"), "validada": e.get("estado") == v.VALIDADA,
                        "monto": max(0.0, (precio - e["precio_referencia"]) * cantidad)} for k, e in caros],
             "otros": [{"fuente": NOMBRES.get(k, k), "clave": k, "precio_ref": e["precio_referencia"],
-                       "pct": e.get("diferencia_pct"), "clasificacion": e.get("clasificacion")} for k, e in otros],
+                       "pct": e.get("diferencia_pct"), "clasificacion": e.get("clasificacion"),
+                       "casi_igual": e.get("clasificacion") == v.ALTO} for k, e in otros],
             "n_filtros": len(usados), "validado": validado,
             "monto_min": min(montos) if montos else 0.0, "monto_max": max(montos) if montos else 0.0,
             "cantidad_por_aclarar": cant, "coherencia": coher,
@@ -127,7 +132,7 @@ def prioridades(filas: list, revision_cant: dict | None = None) -> dict:
             f"Enfócate en {sum(1 for it in foco if it['en_juego'] > 0)} partida(s) que concentran "
             f"{peso_foco:.0f} % del importe (${sum(it['importe'] for it in foco if it['en_juego'] > 0):,.0f} de "
             f"${total:,.0f})." if any(it["en_juego"] > 0 for it in foco) else
-            "Ningún filtro marca un precio caro con dinero en juego; lo pendiente es completar especificaciones."),
+            "Ningún filtro marca un precio alto con dinero en juego; lo pendiente es completar especificaciones."),
     }
 
 
@@ -146,11 +151,12 @@ def _texto(it: dict) -> str:
             for c in it["caros"])
         monto = (f"${it['monto_min']:,.0f} a ${it['monto_max']:,.0f}" if abs(it["monto_max"] - it["monto_min"]) > 1
                  else f"${it['monto_max']:,.0f}")
-        frase = (f"{'caro' if it['validado'] else 'posiblemente caro'} frente a {caros}; en juego "
+        frase = (f"{'alto' if it['validado'] else 'posible alto'} frente a {caros}; en juego "
                  f"{'' if it['validado'] or ' a ' in monto else 'hasta '}{monto}")
         if it["otros"]:
             frase += "; en cambio " + " y ".join(
-                f"{o['fuente']} lo da {v._CLAS_TEXTO.get(o['clasificacion'], '')} (${o['precio_ref']:,.2f})"
+                (f"queda prácticamente igual a {o['fuente']} (${o['precio_ref']:,.2f})" if o.get("casi_igual") else
+                 f"{o['fuente']} lo da {v._CLAS_TEXTO.get(o['clasificacion'], '')} (${o['precio_ref']:,.2f})")
                 for o in it["otros"])
         partes.append(frase)
         if it.get("coherencia"):
@@ -165,7 +171,7 @@ def _texto(it: dict) -> str:
     elif it["tipo"] == "especificacion":
         partes.append("ningún filtro tiene un concepto comparable: pide medidas y alcance para poder compararla")
     elif not cant:
-        partes.append("los filtros la dan en precio o barata")
+        partes.append("los filtros la dan baja o prácticamente igual a la referencia")
     return "; ".join(partes) + "."
 
 
@@ -183,6 +189,25 @@ def _cifras(texto: str) -> set:
     return {str(int(round(_num(x)))) for x in re.findall(r"\$\s?([\d,]+(?:\.\d+)?)", str(texto))}
 
 
+def _solo_texto(respuesta) -> str:
+    """Deja solo el párrafo: algunos modelos lo devuelven envuelto en JSON
+    ({"recomendacion": "..."}) o en un bloque de código."""
+    texto = str(respuesta).strip()
+    texto = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", texto).strip()
+    if texto.startswith("{"):
+        try:
+            import json
+            datos = json.loads(texto)
+            valores = [x for x in datos.values() if isinstance(x, str)] if isinstance(datos, dict) else []
+            if valores:
+                texto = max(valores, key=len)
+        except Exception:
+            m = re.search(r':\s*"(.+)"\s*}\s*$', texto, re.S)
+            if m:
+                texto = m.group(1)
+    return re.sub(r"\s+", " ", texto).strip().strip('"').strip()
+
+
 def redaccion_ia(reco: dict, llamar) -> str | None:
     """Pide a la IA un párrafo con la recomendación. `llamar(prompt)` regresa
     el texto o None. Se descarta si trae un importe que no está en los hechos
@@ -192,14 +217,15 @@ def redaccion_ia(reco: dict, llamar) -> str | None:
         "Eres analista de compras CAPEX en Monterrey. Con ÚNICAMENTE los hechos de abajo, escribe en español "
         "simple una recomendación de máximo 90 palabras: en qué partidas enfocarse al negociar, en qué orden y "
         "qué pedirle al proveedor. No inventes precios, porcentajes ni datos que no estén en los hechos; si una "
-        "referencia es orientativa dilo como 'posiblemente'. Sin listas ni encabezados.\n\nHECHOS:\n" + hechos)
+        "referencia es orientativa dilo como 'posible alto'. Responde solo con el párrafo, en texto simple: sin "
+        "JSON, sin llaves, sin comillas, sin listas ni encabezados.\n\nHECHOS:\n" + hechos)
     try:
         texto = llamar(prompt)
     except Exception:
         return None
     if not texto:
         return None
-    texto = re.sub(r"\s+", " ", str(texto)).strip().strip('"')
+    texto = _solo_texto(texto)
     if len(texto) < 40 or not _cifras(texto) <= _cifras(hechos):
         return None
     return texto

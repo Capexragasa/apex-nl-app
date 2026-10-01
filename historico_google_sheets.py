@@ -107,10 +107,11 @@ def _to_native(v):
 
 
 def clasificar(precio, low, high):
-    if precio < low:
-        return 'BAJO'
+    # Dos dictámenes: arriba de la referencia = ALTO; igual o abajo = BAJO.
     if precio > high:
         return 'ALTO'
+    if precio < low or low == high:
+        return 'BAJO'
     return 'EN MERCADO'
 
 

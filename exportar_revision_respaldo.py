@@ -101,7 +101,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "", **
                   f"{nombre}\n% vs cotizado", f"{nombre}\nsemáforo"]
     _titulo(ws_f, "Comparación independiente por fuente",
             "Cada fuente se compara por separado (sin promediar). Solo las referencias VALIDADAS "
-            "tienen semáforo. Semáforo: ±5 % = EN MERCADO.", len(cab_f))
+            "tienen semáforo. Arriba de la referencia = ALTO; igual o abajo = BAJO.", len(cab_f))
     _encabezado(ws_f, 4, cab_f)
     ws_f.row_dimensions[4].height = 42
     fila_f = {}
@@ -126,8 +126,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "", **
                    f'=IF(OR({ref_col}{r}="",{est_col}{r}="RECHAZADA",{est_col}{r}="SIN DATO"),"",D{r}/{ref_col}{r}-1)',
                    PCT)
             _celda(ws_f, r, base + 3,
-                   f'=IF({est_col}{r}<>"VALIDADA","",IF(D{r}>{ref_col}{r}*1.05,"ALTO",'
-                   f'IF(D{r}<{ref_col}{r}*0.95,"BAJO","EN MERCADO")))',
+                   f'=IF({est_col}{r}<>"VALIDADA","",IF(D{r}>{ref_col}{r},"ALTO","BAJO"))',
                    centro=True)
             _semaforo_cf(ws_f, f"{get_column_letter(base + 3)}{r}")
     ultima_f = 4 + len(filas)
@@ -254,7 +253,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "", **
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
                           "Histórico Ragasa > Nuevo León > CDMX > IA internet."),
         ("Semáforo final", "Todas las validadas coinciden = ese semáforo. Si discrepan = MIXTO. Sin validadas pero con orientativas = "
-                           "NO CONCLUYENTE. Sin nada = SIN DATOS SUFICIENTES. EN MERCADO = ±5 % de la referencia."),
+                           "NO CONCLUYENTE. Sin nada = SIN DATOS SUFICIENTES. ALTO = arriba de la referencia; BAJO = igual o abajo."),
         ("Nuevo León", "Mediana del tabulador homologado de licitaciones de NL, actualizada a hoy con INPC (INEGI)."),
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),
         ("Histórico Ragasa", "Cotizaciones guardadas previamente en el histórico interno (Google Sheets)."),
