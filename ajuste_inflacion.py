@@ -101,7 +101,7 @@ def _obtener_token(token=None):
     try:
         import streamlit as st
         if "inegi_api_token" in st.secrets:
-            return st.secrets["inegi_api_token"]
+            return str(st.secrets["inegi_api_token"]).strip().strip('"').strip()
     except Exception:
         pass
     return None
