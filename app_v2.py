@@ -2122,7 +2122,7 @@ with st.expander(
 
     st.dataframe(
         ejemplo,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -2214,7 +2214,7 @@ if archivo is not None:
             cotizacion[
                 columnas_vista
             ].head(100),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -3423,7 +3423,7 @@ if archivo is not None:
                             "#": f.get("Partida"), "Concepto": f.get("Concepto"), "Fuente": nombre,
                             "P.U. referencia": f["_evaluaciones"][clave]["precio_referencia"],
                             **validacion.evidencia(f["_evaluaciones"][clave], f.get("Concepto")),
-                        } for f in filas for clave, nombre in _FUENTES]), use_container_width=True, hide_index=True)
+                        } for f in filas for clave, nombre in _FUENTES]), width="stretch", hide_index=True)
 
                     with _tabs_detalle[1]:
                         st.dataframe(pd.DataFrame([{
@@ -3434,7 +3434,7 @@ if archivo is not None:
                             "NL p75": _dinero(r.get("nl_p75")),
                             "CDMX (concepto aparte)": _dinero(r.get("cdmx_precio")),
                             "Posición del cotizado": r["posicion"],
-                        } for r in datos_mdo["resumen"]]), use_container_width=True, hide_index=True)
+                        } for r in datos_mdo["resumen"]]), width="stretch", hide_index=True)
                         st.dataframe(pd.DataFrame([{
                             "#": r["partida"], "Fuente": r["fuente"], "Concepto de referencia": r["concepto"],
                             "Relación": r["relacion"], "Unidad": r["unidad"], "Precio (mediana)": _dinero(r["precio"]),
@@ -3442,7 +3442,7 @@ if archivo is not None:
                                               if r.get("rango_bajo") else "—"),
                             "Registros": r["n_registros"], "Periodo / fecha": r["fecha"],
                             "Equivalencia": r["equivalencia"], "Cotizado vs referencia": r["posicion"],
-                        } for r in datos_mdo["referencias"]]), use_container_width=True, hide_index=True)
+                        } for r in datos_mdo["referencias"]]), width="stretch", hide_index=True)
                         st.caption("NL: precios contratados en licitaciones de obra pública (mediana y rango p25–p75, "
                                    "ajustados por INPC). CDMX: tabulador oficial 2026. Los escenarios por pieza "
                                    "(precio por ml × altura supuesta) no entran al rango hasta confirmar dimensiones.")
@@ -3453,7 +3453,7 @@ if archivo is not None:
                         else:
                             st.markdown(f"🔴 {revision_cant['partidas_con_error']} partida(s) con diferencia aritmética.")
                             st.dataframe(pd.DataFrame([a for a in revision_cant["aritmetica"] if not a["ok"]]),
-                                         use_container_width=True, hide_index=True)
+                                         width="stretch", hide_index=True)
                         _iconos = {"REVISAR": "🔴", "CONFIRMAR": "🟡", "OK": "🟢"}
                         for h in revision_cant["hallazgos"]:
                             st.markdown(f"{_iconos.get(h['nivel'], '•')} **{h['tipo']}** (partida {h['partidas']}): {h['detalle']}")
@@ -3464,7 +3464,7 @@ if archivo is not None:
                                     "Diferencia m² (cotizado − escenario)": e["dif_m2"],
                                     "Diferencia × P.U. (sujeta a aclaración)": (
                                         f"${e['importe']:,.2f}" if e["importe"] >= 0 else f"-${-e['importe']:,.2f}"),
-                                } for e in h["escenarios"]]), use_container_width=True, hide_index=True)
+                                } for e in h["escenarios"]]), width="stretch", hide_index=True)
                         st.markdown("**Alcances e impuestos a confirmar por escrito**")
                         for a in revision_cant["alcances_confirmar"]:
                             st.markdown(f"- {a}")
