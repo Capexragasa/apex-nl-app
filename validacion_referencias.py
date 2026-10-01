@@ -159,6 +159,10 @@ def alcance_distinto(cotizado: str, referencia: str):
     t_cot, t_ref = trabajo_principal(original), trabajo_principal(candidato)
     if t_cot and t_ref and t_cot != t_ref:
         return f"trabajo distinto: la partida es {t_cot} y la referencia es {t_ref}"
+    if t_cot and not t_ref:
+        return f"la referencia no es {t_cot} (otro trabajo)"
+    if "estuco" in original and "estuco" not in candidato:
+        return "material distinto: la partida es estuco y la referencia no"
     # Material distinto: p. ej. "columnas para amarrar barda" (concreto)
     # contra "bases para columnas metálicas" (acero). No requiere IA.
     if _METAL.search(candidato) and not _METAL.search(original) and _MAMPOSTERIA.search(original):
@@ -172,6 +176,8 @@ def alcance_distinto(cotizado: str, referencia: str):
         return "la cotización es solo suministro y la referencia incluye instalación"
     if "mano de obra" in original and "material" in original and "solo mano de obra" in candidato:
         return "la referencia es solo mano de obra"
+    if "estuco" in original and "estuco" not in candidato and re.search(r"aplanado|mortero|repellado|zarpeo", candidato):
+        return "material distinto: la partida es estuco y la referencia es aplanado de mortero"
     if "premezclado" in original and "hecho en obra" in candidato:
         return "concreto premezclado vs. hecho en obra"
     if "vinilica" in original and "esmalte" in candidato and "vinilica" not in candidato:
@@ -339,7 +345,7 @@ def evaluar_fuente(
         return _excluir(RECHAZADA, "especificación distinta: " + "; ".join(conflictos))
 
     if precio_referencia > precio * FACTOR_ESCALA or precio_referencia < precio / FACTOR_ESCALA:
-        salida.update(estado=NO_COMPARABLE, clasificacion=None,
+        salida.update(estado=NO_COMPARABLE, clasificacion=None, diferencia_pct=None, diferencia_unitaria=None,
                       motivo="precio fuera de escala frente al cotizado (otra unidad o alcance)")
         return salida
 
@@ -350,7 +356,7 @@ def evaluar_fuente(
         med_ref = extraer_especificaciones(fuente.get("match")).get("sección / medidas")
         med_cot = extraer_especificaciones(concepto).get("sección / medidas")
         if med_ref and not med_cot:
-            salida.update(estado=NO_COMPARABLE, clasificacion=None,
+            salida.update(estado=NO_COMPARABLE, clasificacion=None, diferencia_pct=None, diferencia_unitaria=None,
                           motivo=f"precio por pieza: la referencia es de {', '.join(sorted(med_ref))} y la "
                                  "cotización no declara medidas; pedir dimensiones antes de comparar")
             return salida
@@ -501,7 +507,7 @@ def confiabilidad_fuente(ev: dict) -> str:
     if clave == "historico":
         return "Alta (interna Ragasa)"
     if clave == "nl":
-        return "Alta (oficial, precios contratados)"
+        return "Alta (oficial, licitaciones SIASI/OCDS)"
     if clave == "cdmx":
         return "Alta (oficial, tabulador)"
     if clave == "ia":
@@ -552,8 +558,10 @@ def alcance_precio(ev: dict) -> str:
     if inc:
         partes.append("incluye " + inc.group(1).strip())
     base = {
-        "nl": "precio unitario contratado en obra pública (costo directo + indirectos + utilidad), sin IVA",
-        "cdmx": "precio unitario de tabulador oficial (costo directo + indirectos + utilidad), sin IVA",
+        "nl": ("precio unitario de licitación de obra pública de NL (la publicación OCDS de SIASI los reporta como "
+               "precios contratados; el contrato individual no se revisó); P.U. de obra pública: costo directo + "
+               "indirectos + utilidad, IVA aparte"),
+        "cdmx": "precio unitario del tabulador oficial (costo directo + indirectos + utilidad), IVA aparte",
         "historico": "precio cotizado a Ragasa (cotización recibida), sin IVA",
         "ia": "precio publicado en la página, llevado a sin IVA; alcance no confirmado",
     }.get(ev.get("fuente"), "")
@@ -630,6 +638,7 @@ def evidencia(ev: dict, concepto: str) -> dict:
         "Valor final": inf.get("valor_final"),
         "Factor": inf.get("factor"),
         "Precio usado (actualizado)": ev.get("precio_referencia"),
+        "Justificación del periodo base": inf.get("justificacion", ""),
         "Nota de inflación": ("el ajuste por inflación no confirma vigencia comercial ni equivalencia técnica"
                               if inf else ""),
         "Revisión IA": ev.get("revision_ia") or "",

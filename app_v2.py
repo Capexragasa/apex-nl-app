@@ -1906,6 +1906,7 @@ def leer_pdf(archivo):
     )
 
     metadatos = {
+        "iva_en_documento": bool(re.search(r"\bI\.?\s?V\.?\s?A\b", texto_para_detectar_formato, re.I)),
         "tipo": "PDF digital",
         "hoja_detectada": (
             f"{len(paginas_detectadas)} páginas con partidas"
@@ -2996,22 +2997,31 @@ if archivo is not None:
                         _ev_hist["motivo"] = "conectado, sin coincidencias: " + str(_ev_hist.get("motivo") or "")
                     _anio_nl = nl.get("anio_dato_mas_reciente")
                     evaluaciones["nl"].update({
-                        "documento": "Base_Precios_Unitarios_NL_CDMX.xlsx · hoja 'Tabulador Homologado NL' (licitaciones SIASI)",
+                        "documento": ("SIASI, Secretaría de Movilidad y Planeación Urbana de NL, publicado en formato OCDS "
+                                      "(fuente primaria: si.nl.gob.mx/transparencia/publicaciones). En la app: "
+                                      "Base_Precios_Unitarios_NL_CDMX.xlsx, hoja 'Tabulador Homologado NL' "
+                                      f"(mediana de {nl.get('n_registros') or '—'} renglones; detalle en 'Precios Contratados (real)')"),
+                        "url": "https://data.open-contracting.org/en/publication/32",
                         "unidad_ref": nl.get("unidad"), "region": "Nuevo León",
                         "precio_original": nl.get("precio_mediana"),
                         "registros": nl.get("n_registros"),
                         "periodo": (f"{str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]}"
                                     if nl.get("fecha_min") else None),
-                        "inflacion": ajuste_inflacion.detalle_ajuste(_anio_nl) if (_anio_nl and ajustar_inflacion) else None,
+                        "inflacion": (ajuste_inflacion.detalle_ajuste(
+                            nl.get("periodo_base_inflacion") or _anio_nl, nl.get("fecha_min"), nl.get("fecha_max"))
+                            if (_anio_nl and ajustar_inflacion) else None),
                     })
                     evaluaciones["cdmx"].update({
-                        "documento": "Tabulador General de Precios Unitarios CDMX 2026",
+                        "documento": ("Tabulador General de Precios Unitarios del Gobierno de la CDMX, edición 2026 "
+                                      "(actualización mayo 2026), Secretaría de Obras y Servicios"),
+                        "url": "https://www.obras.cdmx.gob.mx/normas-tabulador/tabulador-general-de-precios-unitarios",
                         "codigo": cdmx.get("clave"), "pagina": cdmx.get("pagina"),
                         "unidad_ref": cdmx.get("unidad"), "region": "CDMX",
                     })
                     if busqueda_ia:
                         evaluaciones["ia"].update({
                             "url": busqueda_ia.get("fuente_url"), "origen": busqueda_ia.get("origen"),
+                            "codigo": busqueda_ia.get("codigo"), "pagina": busqueda_ia.get("pagina"),
                             "documento": busqueda_ia.get("fuente_nombre"), "unidad_ref": busqueda_ia.get("unidad_encontrada"),
                             "region": busqueda_ia.get("region") or "México (web)",
                         })
@@ -3137,6 +3147,7 @@ if archivo is not None:
                 revision_cant = revision_cantidades.revisar(
                     cotizacion.to_dict("records"),
                     total_declarado=metadatos.get("subtotal_declarado"),
+                    iva_en_documento=metadatos.get("iva_en_documento"),
                     contexto=f"{archivo.name} {proyecto or ''}",
                 )
                 datos_mdo = mercado.datos_mercado(
@@ -3290,7 +3301,9 @@ if archivo is not None:
                 st.caption("Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
                            "criterio operativo de la app) · 🟢 barato · gris = no se puede comparar. «Posiblemente» = "
                            "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
-                           "filtros coinciden y cuántos están validados; no promedia precios. Todos los precios se comparan sin IVA.")
+                           "filtros coinciden y cuántos están validados; no promedia precios. Precios antes de IVA: "
+                           + ("se usa el subtotal sin IVA de la cotización." if metadatos.get("iva_en_documento") else
+                              "la cotización no indica IVA; se toman como precios sin IVA (criterio de Compras, por confirmar)."))
 
                 # ---------------- 3. Acción principal ----------------
                 def _nombre_corto(concepto):
@@ -3407,7 +3420,7 @@ if archivo is not None:
                         "Resultado de los 4 filtros": f["_filtros"]["texto_plano"],
                         "Referencias validadas": f["_filtros"]["detalle"],
                         "Referencia": fin_["referencia_negociacion"] or "",
-                        "Respaldo": fin_["respaldo"] or "",
+                        "Respaldo": ("VALIDADA" if f["_filtros"]["validados"] else ("POR VALIDAR" if f["_filtros"]["n"] else "—")),
                         "% vs referencia": fin_["diferencia_pct"],
                         "Diferencia contra referencia": fin_["diferencia_importe"],
                         "Oportunidad validada (potencial)": fin_["ahorro_potencial"] or 0.0,
@@ -3443,7 +3456,7 @@ if archivo is not None:
                             "Registros": r["n_registros"], "Periodo / fecha": r["fecha"],
                             "Equivalencia": r["equivalencia"], "Cotizado vs referencia": r["posicion"],
                         } for r in datos_mdo["referencias"]]), width="stretch", hide_index=True)
-                        st.caption("NL: precios contratados en licitaciones de obra pública (mediana y rango p25–p75, "
+                        st.caption("NL: precios de licitaciones de obra pública publicados por SIASI en formato OCDS (mediana y rango p25–p75, "
                                    "ajustados por INPC). CDMX: tabulador oficial 2026. Los escenarios por pieza "
                                    "(precio por ml × altura supuesta) no entran al rango hasta confirmar dimensiones.")
 

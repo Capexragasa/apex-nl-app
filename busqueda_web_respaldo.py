@@ -169,7 +169,8 @@ def leer_pagina(url: str) -> str:
             import io
             import pdfplumber
             with pdfplumber.open(io.BytesIO(contenido)) as pdf:
-                return "\n".join((p.extract_text() or "") for p in pdf.pages[:25])
+                return "\n".join(f"[[PAGINA {n}]]\n" + (p.extract_text() or "")
+                                 for n, p in enumerate(pdf.pages[:25], 1))
         except Exception:
             return ""
     try:
@@ -204,6 +205,99 @@ def _precios_en(linea: str) -> list[float]:
     return valores
 
 
+_CODIGO_REGISTRO = re.compile(r"(?<![\d.,$/])\b(\d{7,12})\b(?![.,/]\d)")
+_UNIDAD_PRECIO = re.compile(
+    r"\b(m2|m3|ml|m|mts?|pzas?|pza|pieza|piezas|kg|ton|lote|jgo|lt|jornal|sal|salida)\b\.?[\s|:]*\$?\s?"
+    r"(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})", re.I)
+_DESGLOSE_APU = re.compile(r"\W*(materiales|mano de obra|equipo|herramienta|subtotal|utilidad|indirecto|"
+                           r"financiamiento|cargos? adicional|costo directo|sub-?total|iva|total)\b")
+
+
+def _candidatos(lineas):
+    """(contexto, precios, unidad_junto_al_precio, pagina) de cada registro.
+
+    Catálogos y tabuladores en PDF (muchos códigos numéricos): se arma un
+    REGISTRO por código -- código, descripción, unidad y precio -- y el
+    precio solo se toma DESPUÉS de la descripción y la unidad de ese mismo
+    código. Una cifra que aparece antes del código pertenece al registro
+    anterior (así se evita asignar el precio de otro concepto).
+    Páginas sin códigos: se usa el renglón (tablas HTML, fichas, APU)."""
+    paginas, partes, pos = [], [], 0
+    pagina = None
+    for l in lineas:
+        m = re.match(r"\[\[PAGINA (\d+)\]\]", l)
+        if m:
+            pagina = int(m.group(1))
+            continue
+        paginas.append((pos, pagina))
+        partes.append(l)
+        pos += len(l) + 1
+    unido = "\n".join(partes)
+    codigos = list(_CODIGO_REGISTRO.finditer(unido))
+
+    def _pagina_en(p):
+        actual = None
+        for inicio, pg in paginas:
+            if inicio > p:
+                break
+            actual = pg
+        return actual
+
+    if len(codigos) >= 4:
+        for k, c in enumerate(codigos):
+            fin = codigos[k + 1].start() if k + 1 < len(codigos) else min(len(unido), c.end() + 1500)
+            seg = unido[c.end():fin]
+            up = next((m for m in _UNIDAD_PRECIO.finditer(seg)
+                       if len(re.findall(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{4,}", seg[:m.start()])) >= 2), None)
+            if not up:
+                continue   # sin precio propio: no se toma el del siguiente registro
+            desc = seg[:up.start()]
+            if _precios_en(desc):
+                continue   # hay cifras sueltas antes de la unidad: registro ambiguo
+            contexto = re.sub(r"\s+", " ", f"{c.group(1)} {desc} {up.group(1)} ${up.group(2)}").strip()
+            yield contexto, [float(up.group(2).replace(",", ""))], True, _pagina_en(c.start())
+        return
+
+    pagina = None
+    for i, linea in enumerate(lineas):
+        m = re.match(r"\[\[PAGINA (\d+)\]\]", linea)
+        if m:
+            pagina = int(m.group(1))
+            continue
+        precios = _precios_en(linea)
+        if not precios:
+            continue
+        palabras = re.findall(r"[a-záéíóúñ]{4,}", linea.lower())
+        plano_linea = _plano(linea)
+        if _DESGLOSE_APU.match(plano_linea):
+            continue   # renglón de desglose de un APU, no es el precio del concepto
+        contexto = linea
+        if re.search(r"precio unitario|p\.u\.|importe unitario", plano_linea) and len(palabras) < 8:
+            # APU: el concepto y la unidad están arriba ("Descripción ... Unidad: ML").
+            inicio = None
+            for j in range(i - 1, max(-1, i - 30), -1):
+                pj = _plano(lineas[j])
+                if re.search(r"precio unitario", pj):
+                    break
+                if re.search(r"^\W*(descripcion|concepto)\b", pj):
+                    inicio = j
+                    break
+            if inicio is None:
+                continue
+            desc = [lineas[inicio]] + [l for l in lineas[inicio + 1:inicio + 4] if not _precios_en(l)]
+            cercanas = lineas[max(0, inicio - 3):i]
+            unidad_l = next((l for l in cercanas if re.search(r"\bunidad\s*:", _plano(l))), "")
+            contexto = " ".join(desc + [unidad_l, linea])
+        elif len(palabras) < 2:
+            previos = []
+            for j in range(i - 1, max(-1, i - 3), -1):
+                if _precios_en(lineas[j]):
+                    break
+                previos.insert(0, lineas[j])
+            contexto = " ".join(previos + [linea])
+        yield contexto, precios, False, pagina
+
+
 def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cotizado=None,
                         url: str = "", titulo: str = "", origen: str = "página") -> list[dict]:
     """Referencias (concepto, unidad, precio) encontradas en el texto."""
@@ -225,43 +319,7 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
     lineas = [re.sub(r"\s+", " ", l).strip() for l in texto.splitlines()]
     lineas = [l for l in lineas if l]
     salida = []
-    for i, linea in enumerate(lineas):
-        precios = _precios_en(linea)
-        if not precios:
-            continue
-        # Concepto: el MISMO renglón. Solo si el renglón no describe nada
-        # (precio suelto en una ficha de producto) se usan los renglones
-        # anteriores, sin cruzar a otro renglón con precio.
-        palabras = re.findall(r"[a-záéíóúñ]{4,}", linea.lower())
-        contexto = linea
-        plano_linea = _plano(linea)
-        # Renglones de desglose de un APU: no son el precio del concepto.
-        if re.match(r"\W*(materiales|mano de obra|equipo|herramienta|subtotal|utilidad|indirecto|"
-                    r"financiamiento|cargos? adicional|costo directo|sub-?total|iva|total)\b", plano_linea):
-            continue
-        if re.search(r"precio unitario|p\.u\.|importe unitario", plano_linea) and len(palabras) < 8:
-            # Análisis de precio unitario (APU) en PDF de licitación: el
-            # concepto y la unidad están arriba, en "Descripción ... Unidad: ML".
-            inicio = None
-            for j in range(i - 1, max(-1, i - 30), -1):
-                pj = _plano(lineas[j])
-                if re.search(r"precio unitario", pj):
-                    break
-                if re.search(r"^\W*(descripcion|concepto)\b", pj):
-                    inicio = j
-                    break
-            if inicio is not None:
-                desc = [lineas[inicio]] + [l for l in lineas[inicio + 1:inicio + 4] if not _precios_en(l)]
-                cercanas = lineas[max(0, inicio - 3):i]
-                unidad_l = next((l for l in cercanas if re.search(r"\bunidad\s*:", _plano(l))), "")
-                contexto = " ".join(desc + [unidad_l, linea])
-        elif len(palabras) < 2:
-            previos = []
-            for j in range(i - 1, max(-1, i - 3), -1):
-                if _precios_en(lineas[j]):
-                    break
-                previos.insert(0, lineas[j])
-            contexto = " ".join(previos + [linea])
+    for contexto, precios, unidad_junto, pagina in _candidatos(lineas):
         # Párrafos largos (blogs, calculadoras) mezclan varias cifras: no son
         # un renglón de catálogo.
         if len(contexto) > 500:
@@ -304,12 +362,14 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
             anio = max(_ANIO.findall(contexto), default=None)
             salida.append({
                 "precio": round(precio, 2),
-                "concepto": contexto[:300],
+                "concepto": _limpiar_concepto(contexto)[:300],
+                "codigo": _codigo(contexto),
+                "pagina": pagina,
                 "unidad": u,
                 "url": url,
                 "titulo": titulo[:140],
                 "similitud": round(similitud, 1),
-                "unidad_en_renglon": bool(patron_u.search(_plano(linea))),
+                "unidad_en_renglon": unidad_junto or bool(patron_u.search(ctx)),
                 "anio": anio,
                 "origen": origen,
                 "region": region,
@@ -317,6 +377,24 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
             })
             break
     return salida
+
+
+def _limpiar_concepto(texto: str) -> str:
+    """Quita precios repetidos, separadores y unidades sueltas para dejar la
+    descripción legible del concepto (las tablas en PDF repiten importes)."""
+    t = re.sub(r"\$\s?[\d,]+(?:\.\d+)?", " ", texto)
+    t = re.sub(r"(?<![\w.])\d{1,3}(?:,\d{3})*\.\d{2}(?![\w])", " ", t)
+    t = re.sub(r"\[\[PAGINA \d+\]\]", " ", t)
+    t = re.sub(r"\s*\|\s*", " | ", t)
+    t = re.sub(r"^(\W|\b(m2|m3|ml|m|pza|kg)\b)+", "", t.strip(), flags=re.I)
+    t = re.sub(r"\b\d{6,12}\b", " ", t)          # el código va aparte
+    t = re.sub(r"(\s*\|\s*)+", " | ", t)
+    return re.sub(r"\s+", " ", t).strip(" |")
+
+
+def _codigo(texto: str):
+    m = re.search(r"\b(\d{6,12})\b", texto) or re.search(r"\b(?:clave|c[oó]digo)\s*:?\s*([A-Z0-9\-\.]{3,15})", texto, re.I)
+    return m.group(1) if m else None
 
 
 def _confiabilidad(ref: dict) -> str:
@@ -403,6 +481,8 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
         "fuente_nombre": mejor["titulo"] or mejor["url"],
         "fuente_url": mejor["url"],
         "fecha_fuente": mejor["anio"],
+        "codigo": mejor.get("codigo"),
+        "pagina": mejor.get("pagina"),
         "origen": mejor["origen"],
         "region": mejor["region"],
         "fragmento": mejor["concepto"],

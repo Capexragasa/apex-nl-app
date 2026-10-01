@@ -198,7 +198,7 @@ _EQUIVALENCIAS_TRABAJO = [
         'CASTILLO DE CONCRETO ARMEX', 'CASTILLO DE CONCRETO AHOGADO CON VARILLA',
         'CASTILLO DE CONCRETO 15 X 15',
     ]),
-    (r'\bESTUCO\b', ['APLANADO DE ESTUCO EN MUROS', 'APLANADO FINO EN MUROS']),
+    (r'\bESTUCO\b', ['APLANADO DE ESTUCO EN MUROS', 'ESTUCO EN MUROS']),
     (r'\bMURO DE BLOCK\b', ['MURO DE BLOCK DE CONCRETO']),
 ]
 
@@ -1033,8 +1033,8 @@ class ComparadorMultiFuente:
         u = normalize_unit(unidad)
         salida = []
         for score, row in self._top_pool(self._nl_pools, t, u, k):
-            anio = str(row['fecha_max'])[:4]
-            aj = (lambda x: ajustar_precio(x, anio)) if ajustar_inflacion else float
+            anio = _inflacion.periodo_medio(row['fecha_min'], row['fecha_max']) or str(row['fecha_max'])[:4]
+            aj = (lambda x, a=anio: ajustar_precio(x, a)) if ajustar_inflacion else float
             salida.append({
                 'fuente': 'Nuevo León',
                 'concepto': row['concepto_homologado'],
@@ -1044,8 +1044,8 @@ class ComparadorMultiFuente:
                 'rango_alto': round(aj(row['precio_p75']), 2),
                 'n_registros': int(row['n_registros']),
                 'fecha': f"{str(row['fecha_min'])[:7]} a {str(row['fecha_max'])[:7]}",
-                'nota': 'mediana y rango p25-p75 de precios contratados, ajustados por INPC'
-                        if ajustar_inflacion else 'mediana y rango p25-p75 de precios contratados',
+                'nota': 'mediana y rango p25-p75 de licitaciones SIASI (OCDS), ajustados por INPC'
+                        if ajustar_inflacion else 'mediana y rango p25-p75 de licitaciones SIASI (OCDS)',
                 'score': round(score, 1),
                 'confianza': nivel_confianza(score),
             })
@@ -1094,10 +1094,12 @@ class ComparadorMultiFuente:
         if m:
             score, row, confianza = m
             anio_dato = str(row['fecha_max'])[:4]
-            factor = factor_ajuste(anio_dato) if ajustar_inflacion else 1.0
-            p25_uso = ajustar_precio(row['precio_p25'], anio_dato) if ajustar_inflacion else float(row['precio_p25'])
-            p75_uso = ajustar_precio(row['precio_p75'], anio_dato) if ajustar_inflacion else float(row['precio_p75'])
-            mediana_uso = ajustar_precio(row['precio_mediana'], anio_dato) if ajustar_inflacion else float(row['precio_mediana'])
+            # Base de inflación: mes intermedio del periodo de los registros.
+            periodo_base = _inflacion.periodo_medio(row['fecha_min'], row['fecha_max']) or anio_dato
+            factor = factor_ajuste(periodo_base) if ajustar_inflacion else 1.0
+            p25_uso = ajustar_precio(row['precio_p25'], periodo_base) if ajustar_inflacion else float(row['precio_p25'])
+            p75_uso = ajustar_precio(row['precio_p75'], periodo_base) if ajustar_inflacion else float(row['precio_p75'])
+            mediana_uso = ajustar_precio(row['precio_mediana'], periodo_base) if ajustar_inflacion else float(row['precio_mediana'])
             # "EN MERCADO" = dentro de +/-5% del precio mediano de
             # referencia (ver MARGEN_EN_MERCADO), no de la banda p25-p75.
             banda_baja, banda_alta = banda_en_mercado(mediana_uso)
@@ -1111,6 +1113,7 @@ class ComparadorMultiFuente:
                 'precio_max': float(row['precio_max']), 'n_registros': int(row['n_registros']),
                 'variabilidad': row['variabilidad'],
                 'anio_dato_mas_reciente': anio_dato,
+                'periodo_base_inflacion': periodo_base,
                 'ajuste_inflacion_aplicado': ajustar_inflacion,
                 'factor_ajuste_inpc': round(factor, 4),
                 'precio_p25_ajustado': p25_uso, 'precio_p75_ajustado': p75_uso,

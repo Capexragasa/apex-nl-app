@@ -76,6 +76,7 @@ FUENTE = "INEGI, Indice Nacional de Precios al Consumidor (INPC): https://www.in
 # script (ver abajo) para comparar el numero que regresa contra el ultimo
 # dato publicado que conozcas.
 import json
+import re
 import os
 import time
 import urllib.error
@@ -85,7 +86,7 @@ INDICADOR_INPC_MENSUAL = os.environ.get("INEGI_INDICADOR_INPC", "334360")
 
 _INEGI_API_URL = (
     "https://www.inegi.org.mx/app/api/indicadores/desarrolladores/jsonxml/"
-    "INDICATOR/{indicador}/es/00/true/BIE-BISE/2.0/{token}?type=json"
+    "INDICATOR/{indicador}/es/00/false/BIE-BISE/2.0/{token}?type=json"
 )
 
 _cache_inegi = {"resultado": None, "timestamp": 0.0}
@@ -129,7 +130,12 @@ def consultar_inpc_inegi(token=None, indicador=None, timeout=10):
         return None
     try:
         observaciones = datos["Series"][0]["OBSERVATIONS"]
-        ultimo = observaciones[-1]
+        for o in observaciones:
+            try:
+                _SERIE_MENSUAL[str(o["TIME_PERIOD"])] = float(o["OBS_VALUE"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        ultimo = max(observaciones, key=lambda o: str(o.get("TIME_PERIOD")))
         nivel = float(ultimo["OBS_VALUE"])
         periodo = ultimo["TIME_PERIOD"]
     except (KeyError, IndexError, TypeError, ValueError):
@@ -188,6 +194,11 @@ def refrescar_nivel_actual(token=None, forzar=False):
     return True
 
 
+# Serie mensual del INPC ("AAAA/MM" -> nivel), llenada desde la API de INEGI
+# cuando hay token. Sin token se estima el mes interpolando entre diciembres.
+_SERIE_MENSUAL = {}
+
+
 def _anio_valido(anio) -> int:
     try:
         return int(str(anio)[:4])
@@ -195,18 +206,50 @@ def _anio_valido(anio) -> int:
         return max(INPC_NIVEL_DICIEMBRE)
 
 
+def indice_base(periodo):
+    """(valor, etiqueta, método) del INPC para un periodo 'AAAA' o 'AAAA-MM'.
+
+    - Con mes y serie mensual de INEGI: el valor publicado de ese mes.
+    - Con mes sin serie: interpolación lineal entre diciembre del año anterior
+      y diciembre del año (aproximación, se indica así).
+    - Solo año: diciembre de ese año."""
+    texto = str(periodo or "")
+    m = re.match(r"(\d{4})(?:[-/](\d{1,2}))?", texto)
+    disponibles = sorted(INPC_NIVEL_DICIEMBRE)
+    anio = int(m.group(1)) if m else disponibles[-1]
+    mes = int(m.group(2)) if m and m.group(2) else None
+    if mes == 12 and anio in INPC_NIVEL_DICIEMBRE and f"{anio}/12" not in _SERIE_MENSUAL:
+        return INPC_NIVEL_DICIEMBRE[anio], f"diciembre {anio}", "INPC de diciembre publicado (INEGI)"
+    if mes:
+        clave = f"{anio}/{mes:02d}"
+        if clave in _SERIE_MENSUAL:
+            return _SERIE_MENSUAL[clave], f"{_MESES[f'{mes:02d}']} {anio}", "INPC mensual publicado (INEGI)"
+        if anio - 1 in INPC_NIVEL_DICIEMBRE and anio in INPC_NIVEL_DICIEMBRE:
+            a0, a1 = INPC_NIVEL_DICIEMBRE[anio - 1], INPC_NIVEL_DICIEMBRE[anio]
+            return (round(a0 + (a1 - a0) * mes / 12, 3), f"{_MESES[f'{mes:02d}']} {anio}",
+                    "estimado interpolando entre diciembre y diciembre (sin serie mensual)")
+    a_usado = min(max(anio, disponibles[0]), disponibles[-1])
+    return INPC_NIVEL_DICIEMBRE[a_usado], f"diciembre {a_usado}", "INPC de diciembre del año del dato"
+
+
+def periodo_medio(fecha_min, fecha_max):
+    """Mes a la mitad del periodo de los registros ('AAAA-MM')."""
+    def _m(f):
+        x = re.match(r"(\d{4})-(\d{1,2})", str(f or ""))
+        return int(x.group(1)) * 12 + int(x.group(2)) - 1 if x else None
+    a, b = _m(fecha_min), _m(fecha_max)
+    if a is None and b is None:
+        return None
+    a = a if a is not None else b
+    b = b if b is not None else a
+    medio = (a + b) // 2
+    return f"{medio // 12}-{medio % 12 + 1:02d}"
+
+
 def factor_ajuste(anio) -> float:
-    """Factor multiplicador para llevar un precio de 'anio' a su equivalente
-    en NIVEL_ACTUAL (INPC general INEGI). Ej: un precio de 2021 se multiplica
-    por ~1.237 para estimar su equivalente en junio de 2026."""
-    anio = _anio_valido(anio)
-    anios_disponibles = sorted(INPC_NIVEL_DICIEMBRE)
-    if anio < anios_disponibles[0]:
-        anio = anios_disponibles[0]
-    elif anio > anios_disponibles[-1]:
-        anio = anios_disponibles[-1]
-    base = INPC_NIVEL_DICIEMBRE[anio]
-    return NIVEL_ACTUAL / base
+    """Factor para llevar un precio del periodo 'anio' ('AAAA' o 'AAAA-MM')
+    al nivel más reciente del INPC (NIVEL_ACTUAL)."""
+    return NIVEL_ACTUAL / indice_base(anio)[0]
 
 
 def ajustar_precio(precio: float, anio) -> float:
@@ -218,18 +261,21 @@ def ajustar_precio(precio: float, anio) -> float:
         return None
 
 
-def detalle_ajuste(anio) -> dict:
-    """Datos para reproducir el ajuste: índice, periodos, valores y factor.
-    El ajuste por inflación NO confirma vigencia comercial ni equivalencia."""
-    a = _anio_valido(anio)
-    disponibles = sorted(INPC_NIVEL_DICIEMBRE)
-    a_usado = min(max(a, disponibles[0]), disponibles[-1])
-    base = INPC_NIVEL_DICIEMBRE[a_usado]
+def detalle_ajuste(periodo, fecha_min=None, fecha_max=None) -> dict:
+    """Datos para reproducir el ajuste: índice, periodos, valores, factor y
+    por qué se eligió el periodo base. No confirma vigencia ni equivalencia."""
+    valor, etiqueta, metodo = indice_base(periodo)
+    rango = f"{str(fecha_min)[:7]} a {str(fecha_max)[:7]}" if fecha_min and fecha_max else ""
     return {
         "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
-        "periodo_base": f"diciembre {a_usado}",
-        "valor_base": base,
+        "periodo_base": etiqueta,
+        "valor_base": valor,
         "periodo_final": ETIQUETA_ACTUAL,
         "valor_final": NIVEL_ACTUAL,
-        "factor": round(NIVEL_ACTUAL / base, 4),
+        "factor": round(NIVEL_ACTUAL / valor, 4),
+        "justificacion": (
+            (f"Los registros van de {rango}; la mediana mezcla varios meses, así que se toma el mes "
+             f"intermedio del periodo ({etiqueta}) como base. " if rango else "")
+            + f"Valor base: {metodo}."
+        ),
     }
