@@ -529,7 +529,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     plan_infl = []          # (partida_idx, f, r, contrato)
     for i_f, f in enumerate(filas):
         regs_f = (f.get("_evaluaciones") or {}).get("nl", {}).get("registros_todos") or []
-        regs_f = sorted(regs_f, key=lambda r: (str(r.get("ocid") or r.get("licitacion")), r.get("fecha") or ""))
+        # Primero los contratos que entran al precio (los más recientes);
+        # después los más antiguos, que quedan solo como evidencia.
+        regs_f = sorted(regs_f, key=lambda r: (not r.get("usado", True),
+                                               str(r.get("ocid") or r.get("licitacion")), r.get("fecha") or ""))
         for r in regs_f:
             plan_infl.append((i_f, f, r, str(r.get("ocid") or r.get("licitacion"))))
     celda_pu_nl = {}        # partida_idx -> celda con la mediana de medianas
@@ -663,17 +666,19 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                  "Dependencia", "Tipo", "Concepto del contrato", "Fecha", "Precio original", "Mes del índice",
                  "Índice base", "Cómo se obtuvo el índice base", "Mes final", "Índice final", "Factor (final ÷ base)",
                  "Precio actualizado", "Contrato (OCID)", "Mediana del contrato", "P.U. NL de la partida",
-                 "Inflación acumulada del renglón"]
+                 "Inflación acumulada del renglón", "¿Entra al P.U.?"]
         wi.merge_range(0, 0, 0, len(cab_i) - 1, "Actualización por inflación de cada renglón de Nuevo León", f_titulo)
         wi.set_row(0, 26)
         wi.write(1, 0, "Método: (1) solo renglones técnicamente equivalentes a la partida (misma unidad, mismo objeto, "
                        "función, material y especificaciones compatibles); (2) a cada renglón se le aplica la inflación "
                        "ACUMULADA (compuesta) desde su mes hasta el último mes publicado: factor = índice final ÷ índice "
                        "base (columna U = factor − 1); (3) mediana de los renglones de cada contrato (OCID), porque la base no trae el número "
-                       "de partida; (4) P.U. NL = mediana de las medianas por contrato: cada contrato pesa lo mismo. "
+                       "de partida; (4) entran al precio los contratos de los años más recientes hasta reunir al menos 3 "
+                       "(columna V); los más antiguos quedan como evidencia; (5) P.U. NL = mediana de las medianas de "
+                       "los contratos que entran: cada contrato pesa lo mismo. "
                        "Las columnas P a T son fórmulas: si cambias un precio o un índice, el P.U. de 'Por fuente' y "
                        "del Resumen se recalcula. Índice usado: " + _infl.INDICE_NOMBRE + ".", f_sub)
-        wi.set_row(1, 58)
+        wi.set_row(1, 72)
         for c, t in enumerate(cab_i):
             wi.write(3, c, t, f_cab)
         wi.set_row(3, 30)
@@ -708,24 +713,27 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                 wi.write_formula(fila, 18, f"=MEDIAN(Q{filas_contrato[0]}:Q{filas_contrato[-1]})", f_mon,
                                  float(pd_median(vals)))
             # P.U. NL de la partida: mediana de las medianas por contrato.
-            filas_partida = [fx for fx, _ in bloques[i_f]]
+            filas_partida = [fila_ini + kk for kk, (ii, ff, rr, cc) in enumerate(plan_infl)
+                             if ii == i_f and rr.get("usado", True)] or [fx for fx, _ in bloques[i_f]]
+            wi.write(fila, 21, "Sí" if r.get("usado", True) else "No (contrato más antiguo)", f_centro)
             if R == filas_partida[0]:
                 ev_nl = (f.get("_evaluaciones") or {}).get("nl", {})
                 wi.write_formula(fila, 19, f"=MEDIAN(S{filas_partida[0]}:S{filas_partida[-1]})", f_ref.get(
                     "O_" + (ev_nl.get("clasificacion") or ""), f_mon), ev_nl.get("precio_referencia") or 0)
-        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30, 14, 14, 14]):
+        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30, 14, 14, 14, 16]):
             wi.set_column(c, c, ancho)
         # Desglose año por año de la inflación acumulada (del renglón más
         # antiguo usado): el producto de los tramos es el factor.
         try:
-            mes_viejo = min(str(r.get("fecha"))[:7] for (_i, _f, r, _c) in plan_infl)
+            mes_viejo = min(str(r.get("periodo_precio") or r.get("fecha"))[:7]
+                            for (_i, _f, r, _c) in plan_infl if r.get("usado", True))
             desg = _infl.desglose_acumulado(mes_viejo)
         except Exception:
             desg = None
         if desg and desg.get("tramos"):
-            c0 = 22
+            c0 = 23
             wi.merge_range(3, c0, 3, c0 + 5, f"Inflación acumulada año por año desde {desg['base']} "
-                                             "(renglón más antiguo usado)", f_cab)
+                                             "(precio más antiguo que entra al cálculo)", f_cab)
             for j, t in enumerate(["De", "A", "Índice inicial", "Índice final", "Inflación del tramo",
                                    "Inflación acumulada"]):
                 wi.write(4, c0 + j, t, f_cab)
@@ -829,6 +837,11 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen alto (arriba de la referencia) o bajo (igual o abajo); gana la mayoría y, "
                                        "si empatan, 'No coinciden' con el conteo de cada dictamen. No promedia precios. 'Respaldo' dice si "
                                        "hay al menos una referencia validada."),
+        ("Nuevo León: contratos recientes", "De los contratos localizados entran al precio los de los años más recientes, "
+                                            "del más nuevo hacia atrás, hasta reunir al menos 3 contratos (años completos, "
+                                            "porque la base no trae el mes). Un precio reciente necesita menos ajuste por "
+                                            "inflación y refleja mejor el mercado actual. Con menos de 3 contratos se usan "
+                                            "todos. Los más antiguos se listan en 'Inflación NL' sin entrar al cálculo."),
         ("Nuevo León", "Mediana de las medianas por contrato (OCID): cada contrato pesa lo mismo. Dentro de cada "
                        "contrato solo se agrupan renglones técnicamente equivalentes a la partida (mismo objeto, "
                        "función, material, unidad y especificaciones compatibles). Cada renglón se actualiza con el "

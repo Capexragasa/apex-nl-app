@@ -865,7 +865,9 @@ def evidencia(ev: dict, concepto: str) -> dict:
                               if inf else ""),
         "Registros de origen": (
             f"{ev.get('n_renglones')} renglones en "
-            f"{len({(r.get('ocid') or r.get('licitacion')) for r in ev.get('registros_todos')})} contrato(s) (OCID); "
+            f"{len({(r.get('ocid') or r.get('licitacion')) for r in ev.get('registros_todos') if r.get('usado', True)})} "
+            "contrato(s) (OCID) de los años más recientes, de "
+            f"{len({(r.get('ocid') or r.get('licitacion')) for r in ev.get('registros_todos')})} localizados; "
             "detalle completo en la hoja 'Inflación NL'" if ev.get("registros_todos") else "; ".join(
                 f"{r.get('fecha')} · {r.get('licitacion') or ''} · {r.get('dependencia') or ''} · ${r.get('precio'):,.2f}"
                 for r in (ev.get("registros_detalle") or [])[:5])),

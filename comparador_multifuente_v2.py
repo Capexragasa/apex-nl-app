@@ -784,6 +784,10 @@ def clasificar(precio: float, low: float, high: float) -> str:
 # precios historicos de ese concepto".
 MARGEN_EN_MERCADO = 0.0   # sin franja intermedia: solo alto / bajo
 
+# Nuevo León: la referencia sale de los contratos de los años más recientes
+# hasta reunir al menos este número de contratos (con menos, se usan todos).
+MIN_CONTRATOS_RECIENTES = 3
+
 
 def banda_en_mercado(precio_referencia: float, margen: float = MARGEN_EN_MERCADO):
     """Regresa (banda_baja, banda_alta) = precio_referencia +/- margen."""
@@ -1007,7 +1011,8 @@ class ComparadorMultiFuente:
         metodo_inflacion = 'mes intermedio del periodo (aproximación: no se localizaron los renglones)'
         detalle_registros = []
         registros_todos = []
-        n_contratos = 0
+        n_contratos = n_contratos_total = 0
+        anios_usados, _med_orig = [], 0.0
         if ajustar_inflacion and not crudos.empty:
             # 1) Cada renglón con el INPC de SU mes (todo exportable).
             for idx_hoja, c in crudos.iterrows():
@@ -1037,8 +1042,27 @@ class ComparadorMultiFuente:
             # Con todos los decimales (igual que las fórmulas del Excel); el
             # redondeo a centavos se hace al final.
             df_r['_exacto'] = df_r['precio_original'] * _inflacion.NIVEL_ACTUAL / df_r['indice_base']
-            por_contrato = df_r.groupby('contrato').agg(actualizado=('_exacto', 'median'),
-                                                        original=('precio_original', 'median'))
+            df_r['_anio'] = df_r['periodo_precio'].astype(str).str[:4]
+            por_contrato_todos = df_r.groupby('contrato').agg(actualizado=('_exacto', 'median'),
+                                                              original=('precio_original', 'median'),
+                                                              anio=('_anio', 'max'))
+            n_contratos_total = int(len(por_contrato_todos))
+            # 3) Solo los contratos MÁS RECIENTES: se toman los años más
+            #    nuevos hasta reunir al menos MIN_CONTRATOS_RECIENTES. Un
+            #    precio reciente necesita menos ajuste por inflación (menos
+            #    error) y refleja mejor el mercado actual. Se toman años
+            #    completos porque la base no trae el mes del concurso. Los
+            #    contratos más antiguos se conservan como evidencia.
+            anios_usados, acumulados = [], 0
+            for anio_c, cuantos in por_contrato_todos['anio'].value_counts().sort_index(ascending=False).items():
+                anios_usados.append(anio_c)
+                acumulados += int(cuantos)
+                if acumulados >= MIN_CONTRATOS_RECIENTES:
+                    break
+            por_contrato = por_contrato_todos[por_contrato_todos['anio'].isin(anios_usados)]
+            contratos_usados = set(por_contrato.index)
+            for r_, contrato_ in zip(registros_todos, df_r['contrato']):
+                r_['usado'] = contrato_ in contratos_usados
             n_contratos = int(len(por_contrato))
             serie = por_contrato['actualizado']
             mediana_uso = round(float(serie.median()), 2)
@@ -1046,8 +1070,11 @@ class ComparadorMultiFuente:
             p75_uso = round(float(serie.quantile(0.75)), 2)
             _med_orig = float(por_contrato['original'].median())
             factor = mediana_uso / _med_orig if _med_orig else factor
-            metodo_inflacion = (f'{len(crudos)} renglones en {n_contratos} contrato(s): cada renglón con el INPC '
-                                'de su mes; mediana por contrato y después mediana entre contratos')
+            metodo_inflacion = (
+                f'{n_contratos} contrato(s) más recientes ({min(anios_usados)}'
+                + (f' a {max(anios_usados)}' if len(anios_usados) > 1 else '')
+                + f') de {n_contratos_total} localizados: cada renglón con la inflación acumulada desde su '
+                  'periodo; mediana por contrato y después mediana entre contratos')
         if ajustar_inflacion and crudos.empty:
             # Sin los renglones del grupo: se localiza el renglón cuyo precio
             # ES cada estadístico (mediana, p25, p75) y se usa SU mes.
@@ -1100,12 +1127,12 @@ class ComparadorMultiFuente:
             metodo_inflacion = 'sin ajuste por inflación'
         grupo_ok = (not crudos.empty) and ajustar_inflacion
         return {
-            'mediana_original': (round(float(pd.DataFrame(registros_todos).assign(
-                                    k=lambda d: d['ocid'].fillna(d['licitacion']).astype(str))
-                                    .groupby('k')['precio_original'].median().median()), 2) if grupo_ok
-                                 else float(row['precio_mediana'])),
+            'mediana_original': (round(_med_orig, 2) if grupo_ok else float(row['precio_mediana'])),
             'n': n_contratos if grupo_ok else int(row['n_registros']),
-            'n_renglones': int(len(crudos)) if grupo_ok else int(row['n_registros']),
+            'n_total': n_contratos_total if grupo_ok else int(row['n_registros']),
+            'anios_usados': sorted(anios_usados) if grupo_ok else [],
+            'n_renglones': (sum(1 for r in registros_todos if r.get('usado')) if grupo_ok
+                            else int(row['n_registros'])),
             'registros_todos': registros_todos,
             'fecha_min': (str(crudos['fecha'].astype(str).min())[:10] if grupo_ok else str(row['fecha_min'])[:10]),
             'fecha_max': (str(crudos['fecha'].astype(str).max())[:10] if grupo_ok else str(row['fecha_max'])[:10]),
@@ -1116,8 +1143,10 @@ class ComparadorMultiFuente:
             # Año del precio = año de la licitación más reciente del grupo
             # (no el de publicación del registro).
             'anio_dato': (str(max(r['periodo_precio'] for r in registros_todos))[:4] if grupo_ok else anio_dato),
-            'periodo_precio_min': (min(r['periodo_precio'] for r in registros_todos) if grupo_ok else None),
-            'periodo_precio_max': (max(r['periodo_precio'] for r in registros_todos) if grupo_ok else None),
+            'periodo_precio_min': (min(r['periodo_precio'] for r in registros_todos if r.get('usado'))
+                                   if grupo_ok else None),
+            'periodo_precio_max': (max(r['periodo_precio'] for r in registros_todos if r.get('usado'))
+                                   if grupo_ok else None),
         }
 
     def cargar_ragasa(self, df_o_ruta):
@@ -1367,6 +1396,8 @@ class ComparadorMultiFuente:
                 'fecha_min': aj_nl['fecha_min'], 'fecha_max': aj_nl['fecha_max'],
                 'periodo_precio_min': aj_nl.get('periodo_precio_min'),
                 'periodo_precio_max': aj_nl.get('periodo_precio_max'),
+                'n_contratos_total': aj_nl.get('n_total'),
+                'anios_usados': aj_nl.get('anios_usados') or [],
                 'confianza': confianza,
                 'precio_min': float(row['precio_min']), 'precio_p25': float(row['precio_p25']),
                 'precio_mediana': aj_nl['mediana_original'], 'precio_p75': float(row['precio_p75']),

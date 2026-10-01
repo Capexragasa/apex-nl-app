@@ -190,7 +190,8 @@ def _inflacion_nl(nl: dict) -> dict:
                     f"{r.get('licitacion') or ''} del {r.get('fecha')} (${r.get('precio'):,.2f})" for r in regs)
                 + f". Cada uno se actualizó con el índice de su mes ({fuente_indice}) y se promedió; factor efectivo."),
         }, min(str(r.get('fecha'))[:7] for r in regs))
-    todos = nl.get("registros_todos") or []
+    todos_ = nl.get("registros_todos") or []
+    todos = [r for r in todos_ if r.get("usado", True)]
     if todos:
         original = nl.get("precio_mediana") or 0
         ajustada = nl.get("precio_mediana_ajustada") or 0
@@ -209,7 +210,13 @@ def _inflacion_nl(nl: dict) -> dict:
             "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
             "factor": round(ajustada / original, 4) if original else None,
             "justificacion": (
-                f"P.U. NL = mediana de las medianas por contrato (cada contrato pesa lo mismo). Se usaron "
+                (f"De {nl.get('n_contratos_total')} contratos localizados se usan los {nl.get('n_registros')} de los "
+                 f"años más recientes ({', '.join(nl.get('anios_usados') or [])}): un precio reciente necesita menos "
+                 "ajuste por inflación y refleja mejor el mercado actual; se toman años completos, del más nuevo "
+                 "hacia atrás, hasta reunir al menos 3 contratos. Los más antiguos se muestran pero no entran al "
+                 "precio. " if (nl.get("n_contratos_total") or 0) > (nl.get("n_registros") or 0) else
+                 ("Hay menos de 3 contratos: se usan todos. " if (nl.get("n_registros") or 0) < 3 else ""))
+                + f"P.U. NL = mediana de las medianas por contrato (cada contrato pesa lo mismo). Se usaron "
                 f"{len(todos)} renglones técnicamente equivalentes (mismo objeto, función, material, unidad y "
                 f"especificaciones compatibles) de {nl.get('n_registros')} contrato(s) (OCID). A cada renglón se le "
                 f"aplicó la inflación ACUMULADA (compuesta) desde su mes hasta {ajuste_inflacion.ETIQUETA_ACTUAL} "
@@ -3151,7 +3158,8 @@ if archivo is not None:
                         "documento": ("SIASI, Secretaría de Movilidad y Planeación Urbana de NL, publicado en formato OCDS "
                                       "(fuente primaria: si.nl.gob.mx/transparencia/publicaciones). En la app: "
                                       "Base_Precios_Unitarios_NL_CDMX.xlsx, hoja 'Tabulador Homologado NL' "
-                                      f"(mediana de las medianas de {nl.get('n_registros') or '—'} contrato(s), "
+                                      f"(mediana de las medianas de los {nl.get('n_registros') or '—'} contrato(s) "
+                                      f"más recientes de {nl.get('n_contratos_total') or nl.get('n_registros') or '—'}, "
                                       f"{nl.get('n_renglones') or nl.get('n_registros') or '—'} renglones; detalle en "
                                       "'Precios Contratados (real)')"),
                         "url": "https://data.open-contracting.org/en/publication/32",
@@ -3547,20 +3555,27 @@ if archivo is not None:
                                 [x["precio_actualizado"] for x in kv[1]]).median()):
                             orig = float(pd.Series([x["precio_original"] for x in g]).median())
                             act = float(pd.Series([x["precio_actualizado"] for x in g]).median())
-                            filas_c.append(
-                                f"<tr><td>{e(k_.replace('ocds-7wj9x5-', ''))}</td><td>{e(g[0].get('anio_licitacion') or '')}</td>"
+                            usado_ = g[0].get("usado", True)
+                            filas_c.append((usado_, (
+                                f"<tr{'' if usado_ else ' class=nou'}><td>{e(k_.replace('ocds-7wj9x5-', ''))}</td>"
+                                f"<td>{e(g[0].get('anio_licitacion') or '')}</td>"
                                 f"<td>{len(g)}</td><td>${orig:,.2f}</td>"
-                                f"<td>+{g[0].get('inflacion_acumulada_pct', 0):.1f} %</td><td><b>${act:,.2f}</b></td></tr>")
+                                f"<td>+{g[0].get('inflacion_acumulada_pct', 0):.1f} %</td><td><b>${act:,.2f}</b></td>"
+                                f"<td>{'Sí' if usado_ else 'No (más antiguo)'}</td></tr>")))
+                        n_us = sum(1 for u_, _ in filas_c if u_)
+                        filas_c = [h_ for u_, h_ in filas_c if u_] + [h_ for u_, h_ in filas_c if not u_]
                         partes.append(
-                            f'<div class="ps">Contratos usados ({len(grupos)}; {len(todos)} renglones)</div>'
+                            f'<div class="ps">Contratos: se usan los {n_us} más recientes de {len(grupos)} localizados</div>'
                             '<table class="mini"><tr><th>Contrato</th><th>Año</th><th>Renglones</th><th>Mediana original</th>'
-                            '<th>Inflación acumulada</th><th>Mediana actualizada</th></tr>'
-                            + "".join(filas_c[:12]) + "</table>"
-                            + (f'<div class="pn">… y {len(filas_c) - 12} contrato(s) más en el Excel.</div>'
-                               if len(filas_c) > 12 else "")
-                            + f'<div class="pn">P.U. Nuevo León = mediana de estas medianas por contrato = '
-                              f'<b>{_dinero(ev.get("precio_referencia"))}</b> (no es un promedio). Cada renglón, con su '
-                              "índice y su factor, está en la hoja «Inflación NL» del Excel.</div>")
+                            '<th>Inflación acumulada</th><th>Mediana actualizada</th><th>¿Entra al precio?</th></tr>'
+                            + "".join(filas_c[:16]) + "</table>"
+                            + (f'<div class="pn">… y {len(filas_c) - 16} contrato(s) más en el Excel.</div>'
+                               if len(filas_c) > 16 else "")
+                            + f'<div class="pn">P.U. Nuevo León = mediana de las medianas de los {n_us} contratos que '
+                              f'entran = <b>{_dinero(ev.get("precio_referencia"))}</b> (no es un promedio). Se toman los '
+                              "años más recientes hasta reunir al menos 3 contratos; los más antiguos (en gris) quedan "
+                              "solo como evidencia. Cada renglón, con su índice y su factor, está en la hoja "
+                              "«Inflación NL» del Excel.</div>")
                     regs_h = ev.get("registros_historico") or []
                     if regs_h:
                         partes.append(
@@ -3627,6 +3642,7 @@ if archivo is not None:
                     ".cmp .pop table.kv td{border:0;padding:3px 0;word-break:break-word}"
                     ".cmp .pop table.mini th{background:#eef2f8;color:#1f3864;padding:4px 6px;white-space:normal}"
                     ".cmp .pop table.mini td{border:1px solid #e4e7ec;padding:3px 6px}"
+                    ".cmp .pop table.mini tr.nou td{color:#98a2b3}"
                     "</style>"
                     f'<div style="overflow-x:auto"><table class="cmp"><tr>{_cab}</tr>{"".join(_filas_html)}</table></div>',
                     unsafe_allow_html=True,
