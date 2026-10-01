@@ -2083,7 +2083,9 @@ with st.sidebar:
         st.markdown("1. Histórico Ragasa — ⚠️ no conectado")
     else:
         _res_hist = historico.resumen()
-        st.markdown(f"1. Histórico Ragasa — ✅ {_res_hist['total_renglones']} renglones")
+        st.markdown(f"1. Histórico Ragasa — ✅ {_res_hist['total_renglones']} renglones · "
+                    f"[abrir hoja](https://docs.google.com/spreadsheets/d/"
+                    f"{st.secrets.get('sheet_id', DEFAULT_SHEET_ID)}/edit)")
     st.markdown("2. Nuevo León (licitaciones) — ✅")
     st.markdown("3. CDMX (tabulador 2026) — ✅")
     if busqueda_ia_disponible:
