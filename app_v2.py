@@ -3262,315 +3262,6 @@ if archivo is not None:
                 # la cuota") en vez de solo un mensaje genérico -- así se
                 # puede saber la causa real en lugar de adivinar.
                 # ----------------------------------------------------------
-                _pendiente_total = sum(
-                    max(0.0, f["_final"]["diferencia_importe"] or 0)
-                    for f in filas if f["_final"].get("respaldo") == "PENDIENTE DE VALIDAR"
-                )
-                if _pendiente_total:
-                    st.caption(
-                        f"Además hay ${_pendiente_total:,.2f} de diferencia contra referencias "
-                        "pendientes de validar (no es ahorro respaldado hasta confirmar especificación y vigencia)."
-                    )
-
-                # ----------------------------------------------------------
-                # ESTADO DE LA IA, visible (antes quedaba escondido en un
-                # recuadro cerrado): dice en palabras simples si la revisión
-                # y la búsqueda con IA de verdad corrieron y, si no, por qué.
-                # ----------------------------------------------------------
-                def _causa_simple(mensaje):
-                    t = str(mensaje or "").lower()
-                    if any(x in t for x in ("429", "resource_exhausted", "quota", "rate limit")):
-                        return ("se acabó la cuota gratuita de Gemini por ahora (se renueva cada día; "
-                                "también hay límite por minuto)")
-                    if any(x in t for x in ("api key not valid", "api_key_invalid", "invalid api key", "401")):
-                        return "la clave de Gemini (gemini_api_key) no es válida"
-                    if "403" in t or "permission" in t or "billing" in t:
-                        return ("Google no permite esta función con tu clave (puede requerir facturación "
-                                "activada para la búsqueda con Google)")
-                    if any(x in t for x in ("404", "not_found", "not found")):
-                        return "el modelo de Gemini no está disponible para tu clave"
-                    if "ningún precio pasó la validación" in t:
-                        return "Gemini sí buscó, pero ningún precio tenía fuente y frase comprobables"
-                    if "json" in t:
-                        return "Gemini respondió en un formato que no se pudo leer"
-                    return str(mensaje)[:200]
-
-                _n_revisadas = sum(
-                    1 for f in filas for clave in ("nl", "cdmx", "historico")
-                    if (f["_evaluaciones"][clave].get("revision_ia"))
-                )
-                _n_por_revisar = sum(
-                    1 for f in filas for clave in ("nl", "cdmx", "historico")
-                    if f["_evaluaciones"][clave]["estado"] not in (validacion.SIN_DATO,)
-                )
-                _motores = [
-                    str((registro.get("busqueda_ia") or {}).get("motor", ""))
-                    for registro in fila_registros
-                    if (registro.get("busqueda_ia") or {}).get("tiene_dato")
-                ]
-                _n_gemini = sum(1 for m in _motores if m.startswith("Gemini"))
-                _n_tavily = sum(1 for m in _motores if m.startswith("Tavily"))
-                _error_revision = (revision_ia.ultimo_error() or {}).get("mensaje") if usar_ia else None
-                _error_busqueda = (
-                    (busqueda_mercado_ia.ultimo_error() or {}).get("mensaje")
-                    if busqueda_ia_disponible and buscar_precios_web else None
-                )
-
-                with st.container(border=True):
-                    st.markdown("**Estado de la IA en esta revisión**")
-                    if not usar_ia:
-                        st.warning("Revisión con IA: **apagada**. Actívala en la barra lateral; "
-                                   "sin ella casi ninguna referencia puede quedar VALIDADA.")
-                    elif _n_revisadas:
-                        st.success(f"Revisión con IA: activa, {_n_revisadas} referencia(s) revisada(s) por la IA.")
-                        if _error_revision:
-                            st.caption(f"Algunas no se revisaron: {_causa_simple(_error_revision)}.")
-                    else:
-                        st.error("Revisión con IA: **no se pudo hacer**. Causa: "
-                                 f"{_causa_simple(_error_revision) if _error_revision else 'la IA no respondió'}.")
-
-                    if not busqueda_ia_disponible:
-                        st.warning("Búsqueda de precios con IA: no configurada (falta gemini_api_key en Secrets).")
-                    elif not buscar_precios_web:
-                        st.info("Búsqueda de precios con IA: apagada en la barra lateral.")
-                    elif _n_gemini:
-                        st.success(f"Búsqueda de precios con IA: Gemini encontró {_n_gemini} precio(s) con fuente.")
-                        if _n_tavily:
-                            st.caption(f"Otros {_n_tavily} vinieron del buscador de respaldo (orientativos).")
-                    else:
-                        _txt = ("Búsqueda de precios con IA: **Gemini no entregó precios**. Causa: "
-                                f"{_causa_simple(_error_busqueda) if _error_busqueda else 'no encontró fuentes comprobables'}.")
-                        if _n_tavily:
-                            _txt += f" Se usaron {_n_tavily} precio(s) del buscador de respaldo, solo como orientativos."
-                        st.error(_txt)
-
-                    if _error_revision or _error_busqueda:
-                        with st.expander("Detalle técnico (para soporte)"):
-                            if _error_revision:
-                                st.code(f"Revisión IA: {_error_revision}", language=None)
-                            if _error_busqueda:
-                                st.code(f"Búsqueda IA: {_error_busqueda}", language=None)
-
-                # Precio caro/en rango/bajo -- pedido explícito de dirección:
-                # ALTO (caro) = rojo, EN MERCADO (en rango) = amarillo,
-                # BAJO (por debajo del precio de referencia) = verde.
-                def resaltar(valor):
-
-                    if valor == "ALTO":
-                        return (
-                            "background-color: #f7c1c1; "
-                            "color: #501313"
-                        )
-
-                    if valor == "EN MERCADO":
-                        return (
-                            "background-color: #ffe699; "
-                            "color: #7f6000"
-                        )
-
-                    if valor == "BAJO":
-                        return (
-                            "background-color: #c6e0b4; "
-                            "color: #006100"
-                        )
-
-                    if (
-                        valor
-                        == "SIN DATOS SUFICIENTES"
-                    ):
-                        return (
-                            "background-color: #d9d9d9; "
-                            "color: #595959"
-                        )
-
-                    return ""
-
-                # Confianza del TEXTO encontrado (qué tan seguro está el
-                # sistema de que el match es el mismo material) -- también
-                # pedido de dirección, en sentido contrario al de arriba:
-                # ALTA confianza = bueno = verde, BAJA confianza = hay que
-                # revisar a mano = rojo.
-                def resaltar_confianza(valor):
-
-                    if valor == "ALTA":
-                        return (
-                            "background-color: #c6e0b4; "
-                            "color: #006100"
-                        )
-
-                    if valor == "MEDIA":
-                        return (
-                            "background-color: #ffe699; "
-                            "color: #7f6000"
-                        )
-
-                    if valor == "BAJA":
-                        return (
-                            "background-color: #f7c1c1; "
-                            "color: #501313"
-                        )
-
-                    return ""
-
-                def resaltar_diferencia(valor):
-
-                    if valor is None or pd.isna(valor):
-                        return ""
-
-                    if valor > 0:
-                        return "color: #c0392b"
-
-                    if valor < 0:
-                        return "color: #1e8449"
-
-                    return ""
-
-                # ------------------------------------------------------------
-                # Vista simple (default) vs. vista avanzada: con 4 fuentes,
-                # cada una con su match/confiabilidad/precio/resultado/
-                # diferencia, la tabla completa llega a tener ~25-30
-                # columnas -- demasiado para leer de un vistazo. Por default
-                # se muestra solo lo que hace falta para decidir (veredicto
-                # combinado + qué tan lejos está del mercado); quien quiera
-                # ver POR QUÉ se llegó a ese veredicto (con qué coincidió
-                # cada fuente, su confiabilidad, su precio) puede activar la
-                # vista avanzada con el mismo detalle de siempre.
-                # ------------------------------------------------------------
-                st.markdown("#### Comparativo por partida")
-                st.caption(
-                    "Precio de cada fuente: 🔴 cotizado caro · 🟡 en mercado (±5 %) · 🟢 cotizado "
-                    "barato, solo cuando la Confiabilidad dice VALIDADA (concepto confirmado por IA, "
-                    "especificaciones declaradas y coincidentes, precio vigente ≤12 meses). Gris en cursiva = "
-                    "orientativo (EQUIVALENCIA PARCIAL / POR CONFIRMAR / NO CONCLUYENTE). Tachado = RECHAZADA. "
-                    "Sin referencia validada, la diferencia se reporta como pendiente de validar, no como ahorro."
-                )
-
-                _FUENTES = (("historico", "Histórico"), ("nl", "Nuevo León"),
-                            ("cdmx", "CDMX"), ("ia", "IA internet"))
-                _SEMAFORO = {
-                    "ALTO": "🔴 Caro",
-                    "EN MERCADO": "🟡 En mercado",
-                    "BAJO": "🟢 Barato",
-                    "MIXTO": "🟠 Mixto (fuentes discrepan)",
-                    "NO CONCLUYENTE": "⚪ No concluyente",
-                    "SIN DATOS SUFICIENTES": "⚪ Sin referencia validada",
-                }
-
-                def _dinero(valor):
-                    return f"${valor:,.2f}" if valor is not None and pd.notna(valor) else "—"
-
-                registros_vista = []
-                estilos_vista = []
-                for _, f in tabla.iterrows():
-                    evs = f["_evaluaciones"]
-                    fin_ = f["_final"]
-                    fila_v = {
-                        "# Concepto": f.get("Partida"),
-                        "Descripción": f.get("Concepto") or "Descripción no detectada",
-                        "Unidad": f.get("Unidad"),
-                        "Cantidad": f.get("Cantidad"),
-                        "Precio": _dinero(f.get("Precio cotizado")),
-                        "Precio total": _dinero(
-                            f.get("Importe") if pd.notna(f.get("Importe")) else
-                            (convertir_numero(f.get("Cantidad")) or 0) * f.get("Precio cotizado")
-                        ),
-                    }
-                    estilo_v = {}
-                    # Misma estructura de siempre por fuente: Descripción,
-                    # Precio y Confiabilidad (que ahora dice si la referencia
-                    # quedó VALIDADA, POR CONFIRMAR, RECHAZADA...).
-                    _NOMBRE_COL = {"historico": ("histórico Ragasa", "histórico"),
-                                   "nl": ("Nuevo León", "Nuevo León"),
-                                   "cdmx": ("CDMX", "CDMX"), "ia": ("IA", "IA")}
-                    for clave, nombre in _FUENTES:
-                        ev = evs[clave]
-                        _largo, _corto = _NOMBRE_COL[clave]
-                        col_desc = f"Descripción {_largo}"
-                        col_p, col_e = f"Precio {_corto}", f"Confiabilidad {_corto}"
-                        fila_v[col_desc] = ev.get("descripcion") or "—"
-                        fila_v[col_p] = _dinero(ev["precio_referencia"])
-                        fila_v[col_e] = ev["estado"] if ev["estado"] != validacion.SIN_DATO else "—"
-                        if ev["estado"] == validacion.VALIDADA:
-                            estilo_v[col_p] = {
-                                "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
-                                "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 650",
-                                "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 650",
-                            }.get(ev["clasificacion"], "")
-                            estilo_v[col_e] = "color: #14532d; font-weight: 650"
-                        elif ev["estado"] == validacion.RECHAZADA:
-                            estilo_v[col_p] = "color: #98a2b3; text-decoration: line-through"
-                            estilo_v[col_e] = "color: #b42318; font-weight: 650"
-                        elif ev["estado"] in validacion.ORIENTATIVAS:
-                            estilo_v[col_p] = "background-color: #f1f3f5; color: #60666d; font-style: italic"
-                            estilo_v[col_e] = "color: #8a6100"
-                        else:
-                            estilo_v[col_e] = "color: #98a2b3"
-                    _texto_final = _SEMAFORO.get(fin_["semaforo"], fin_["semaforo"])
-                    if fin_["semaforo"] in ("ALTO", "BAJO", "EN MERCADO") and fin_["fuentes_validadas"]:
-                        _texto_final += f" · según {fin_['fuentes_validadas']}"
-                    _nombres_clas = {"ALTO": "caro", "BAJO": "barato", "EN MERCADO": "en mercado"}
-                    if fin_["semaforo"] == "MIXTO":
-                        # Decir qué dice cada fuente en vez de solo "mixto".
-                        _texto_final = "🟠 " + " · ".join(
-                            f"{_nombres_clas.get(ev['clasificacion'], ev['clasificacion'])} vs {nombre}"
-                            for clave, nombre in _FUENTES
-                            for ev in [evs[clave]] if ev["estado"] == validacion.VALIDADA
-                        )
-                    elif fin_["semaforo"] in ("NO CONCLUYENTE", "SIN DATOS SUFICIENTES"):
-                        # Pista orientativa (no decide): qué dicen las referencias no validadas.
-                        _pistas = [
-                            f"{nombre} {ev['diferencia_pct']:+.0f}%"
-                            for clave, nombre in _FUENTES
-                            for ev in [evs[clave]]
-                            if ev["estado"] in validacion.ORIENTATIVAS
-                            and ev["diferencia_pct"] is not None
-                        ]
-                        if _pistas:
-                            _texto_final += " (orientativo: " + ", ".join(_pistas) + ")"
-                    fila_v["Semáforo"] = _texto_final
-                    _respaldo = "validada" if fin_["respaldo"] == "VALIDADA" else "pendiente de validar"
-                    fila_v["Precio de referencia"] = (
-                        f"{_dinero(fin_['precio_negociacion'])} ({fin_['referencia_negociacion']} · {_respaldo})"
-                        if fin_["precio_negociacion"] else "—"
-                    )
-                    fila_v["% diferencia"] = (
-                        f"{fin_['diferencia_pct']:+.1f}%" if fin_["diferencia_pct"] is not None else "—"
-                    )
-                    if fin_["respaldo"] == "VALIDADA":
-                        _etiqueta_dif = {
-                            "ALTO": "ahorro respaldado", "EN MERCADO": "dentro de mercado (±5 %)",
-                            "BAJO": "cotizado por debajo",
-                        }.get(fin_["semaforo"], "fuentes validadas discrepan")
-                    else:
-                        _etiqueta_dif = "pendiente de validar"
-                    fila_v["Diferencia contra referencia"] = (
-                        f"{_dinero(fin_['diferencia_importe'])} · {_etiqueta_dif}"
-                        if fin_["diferencia_importe"] is not None else "—"
-                    )
-                    estilo_v["Semáforo"] = {
-                        "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 700",
-                        "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 700",
-                        "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 700",
-                        "MIXTO": "background-color: #fde7d2; color: #7a3e00; font-weight: 700",
-                    }.get(fin_["semaforo"], "background-color: #e4e7eb; color: #475467")
-                    if fin_["ahorro_potencial"]:
-                        estilo_v["Diferencia contra referencia"] = "color: #712121; font-weight: 650"
-                    elif fin_["diferencia_importe"]:
-                        estilo_v["Diferencia contra referencia"] = "color: #60666d; font-style: italic"
-                    registros_vista.append(fila_v)
-                    estilos_vista.append(estilo_v)
-
-                comparativo_vista = pd.DataFrame(registros_vista)
-                _estilos_df = pd.DataFrame(estilos_vista, index=comparativo_vista.index).reindex(
-                    columns=comparativo_vista.columns
-                ).fillna("")
-                st.dataframe(
-                    comparativo_vista.style.apply(lambda _d: _estilos_df, axis=None),
-                    use_container_width=True,
-                    height=min(680, 48 + 36 * len(comparativo_vista)),
-                    hide_index=True,
-                )
-
                 # ----------------------------------------------------------
                 # Revisión de cantidades y aritmética: un buen precio unitario
                 # no sirve si la cantidad está inflada (caso barda: 59 m² de
@@ -3581,33 +3272,7 @@ if archivo is not None:
                     total_declarado=metadatos.get("subtotal_declarado"),
                     contexto=f"{archivo.name} {proyecto or ''}",
                 )
-                st.markdown("#### Revisión de cantidades y aritmética")
-                if revision_cant["partidas_con_error"] == 0 and revision_cant["total_ok"]:
-                    st.success(
-                        f"Aritmética correcta: cantidad × P.U. cuadra en todas las partidas y el total "
-                        f"es ${revision_cant['total_calculado']:,.2f}."
-                    )
-                else:
-                    st.error(
-                        f"Aritmética con diferencias: {revision_cant['partidas_con_error']} partida(s) no cuadran "
-                        f"o el total no coincide (calculado ${revision_cant['total_calculado']:,.2f})."
-                    )
-                    st.dataframe(
-                        pd.DataFrame([a for a in revision_cant["aritmetica"] if not a["ok"]]),
-                        use_container_width=True, hide_index=True,
-                    )
-                _iconos = {"REVISAR": "🔴", "CONFIRMAR": "🟡", "OK": "🟢"}
-                for h in revision_cant["hallazgos"]:
-                    st.markdown(f"{_iconos.get(h['nivel'], '•')} **{h['tipo']}** (partida {h['partidas']}): {h['detalle']}")
-                    if h["escenarios"]:
-                        st.dataframe(
-                            pd.DataFrame([{
-                                "Escenario": e["nombre"], "Fórmula": e["formula"], "m² esperados": e["m2"],
-                                "Diferencia vs cotizado (m²)": e["dif_m2"],
-                                "Importe sujeto a aclaración": f"${e['importe']:,.2f}",
-                            } for e in h["escenarios"]]),
-                            use_container_width=True, hide_index=True,
-                        )
+
                 # ----------------------------------------------------------
                 # Datos de mercado para comparar: varias referencias reales por
                 # partida (NL con rango p25-p75, CDMX 2026), aunque ninguna
@@ -3620,76 +3285,564 @@ if archivo is not None:
                 )
                 resumen_mdo = {str(r["partida"]): r for r in datos_mdo["resumen"]}
 
-                with st.expander("Alcances e impuestos a confirmar con el proveedor"):
-                    for a in revision_cant["alcances_confirmar"]:
-                        st.markdown(f"- {a}")
-                    st.caption("No son omisiones comprobadas: confirmar por escrito antes de emitir la orden de compra.")
+                # ----------------------------------------------------------
+                # RESULTADOS EN PESTAÑAS: el Resumen dice en una fila por
+                # partida qué concluir y qué hacer; el detalle (fuentes,
+                # cantidades, mercado, evidencia) queda en las otras pestañas.
+                # ----------------------------------------------------------
+                tab_res, tab_fuente, tab_cant, tab_mdo, tab_evid = st.tabs([
+                    "📋 Resumen",
+                    "Comparativo por fuente",
+                    "Cantidades",
+                    "Datos de mercado",
+                    "Evidencia y estado de la IA",
+                ])
 
-                st.markdown("#### Datos de mercado para comparar")
-                st.caption(
-                    "Precios reales publicados (NL: licitaciones de obra pública, mediana y rango p25–p75, "
-                    "ajustados por INPC; CDMX: tabulador oficial 2026). Sirven para ubicar el precio cotizado "
-                    "aunque la equivalencia exacta no esté demostrada. Se excluyen materiales distintos y cifras "
-                    "de otra escala."
-                )
-                st.dataframe(
-                    pd.DataFrame([{
-                        "#": r["partida"],
-                        "Concepto": r["concepto"],
-                        "Unidad": r["unidad"],
-                        "P.U. cotizado": _dinero(r["precio_cotizado"]),
-                        "Referencias": f"{r['referencias']} ({r['tipo']})",
-                        "Mínimo observado": _dinero(r["minimo"]),
-                        "Mediana de referencias": _dinero(r["mediana_referencias"]),
-                        "Máximo observado": _dinero(r["maximo"]),
-                        "vs mediana": f"{r['vs_mediana_pct']:+.1f}%" if r["vs_mediana_pct"] is not None else "—",
-                        "Dónde cae el cotizado": r["posicion"],
-                    } for r in datos_mdo["resumen"]]),
-                    use_container_width=True, hide_index=True,
-                )
-                with st.expander("Ver cada referencia de mercado (concepto, precio, rango, registros, fecha)"):
+                def _dinero(valor):
+                    return f"${valor:,.2f}" if valor is not None and pd.notna(valor) else "—"
+
+                with tab_res:
+                    _hallazgos_partida = {}
+                    for _h in revision_cant["hallazgos"]:
+                        for _p in str(_h["partidas"]).split(","):
+                            _hallazgos_partida.setdefault(_p.strip(), []).append(_h)
+
+                    def _monto(valor):
+                        return f"${valor:,.0f}" if valor is not None else "—"
+
+                    filas_resumen = []
+                    total_precio_revisar = 0.0
+                    total_cant_min = total_cant_max = 0.0
+                    for _f in filas:
+                        _part = str(_f.get("Partida"))
+                        _fin = _f["_final"]
+                        _mdo = resumen_mdo.get(_part, {})
+                        _precio = _f.get("Precio cotizado")
+                        _cant = convertir_numero(_f.get("Cantidad")) or 0
+
+                        # Veredicto de precio: validado si existe; si no,
+                        # orientativo con los datos de mercado.
+                        if _fin.get("respaldo") == "VALIDADA":
+                            _ver = {
+                                "ALTO": "🔴 Caro", "EN MERCADO": "🟡 En mercado",
+                                "BAJO": "🟢 Barato", "MIXTO": "🟠 Fuentes discrepan",
+                            }.get(_fin["semaforo"], _fin["semaforo"])
+                            _ver += f" (validado: {_fin['fuentes_validadas']})"
+                            _caro = _fin["semaforo"] == "ALTO"
+                        elif _mdo.get("referencias"):
+                            _pos = _mdo.get("posicion", "")
+                            _ver = ("🔴 Arriba del mercado" if _pos.startswith("🔴") else
+                                    "🟢 Debajo del mercado" if _pos.startswith("🟢") else
+                                    "🟡 Dentro del rango") + " (orientativo)"
+                            _caro = _pos.startswith("🔴")
+                        else:
+                            _ver, _caro = "⚪ Sin datos de mercado", False
+
+                        _hs = _hallazgos_partida.get(_part, [])
+                        _niveles = {h["nivel"] for h in _hs}
+                        _cant_txt = ("🔴 Por aclarar" if "REVISAR" in _niveles else
+                                     "🟡 Confirmar" if "CONFIRMAR" in _niveles else "🟢 OK")
+
+                        _acciones = []
+                        _monto_precio = None
+                        if _caro:
+                            _acciones.append("Negociar precio")
+                            _ref_neg = (_fin.get("precio_negociacion") if _fin.get("respaldo") == "VALIDADA"
+                                        else _mdo.get("mediana_referencias"))
+                            if _ref_neg and _precio > _ref_neg:
+                                _monto_precio = (_precio - _ref_neg) * _cant
+                                total_precio_revisar += _monto_precio
+                        _monto_cant = None
+                        for _h in _hs:
+                            if _h["nivel"] == "REVISAR" and _h["escenarios"]:
+                                _acciones.append("Pedir generador de volúmenes")
+                                _imps = [e["importe"] for e in _h["escenarios"]]
+                                _monto_cant = (min(_imps), max(_imps))
+                                total_cant_min += min(_imps)
+                                total_cant_max += max(_imps)
+                            elif _h["nivel"] == "CONFIRMAR":
+                                _acciones.append("Pedir croquis")
+                        for _clave in ("nl", "cdmx", "historico"):
+                            _mot = _f["_evaluaciones"][_clave].get("motivo") or ""
+                            _m = re.search(r"el proveedor no declara ([^;]+)", _mot)
+                            if _m:
+                                _acciones.append(f"Pedir especificación ({_m.group(1).strip()})")
+                                break
+                        if not _acciones:
+                            _acciones.append("Sin acción: precio razonable")
+
+                        _en_juego = []
+                        if _monto_precio:
+                            _en_juego.append(f"precio {_monto(_monto_precio)}")
+                        if _monto_cant:
+                            _en_juego.append(f"cantidad {_monto(_monto_cant[0])}–{_monto(_monto_cant[1])}")
+
+                        filas_resumen.append({
+                            "#": _part,
+                            "Concepto": _f.get("Concepto"),
+                            "Cotizado": f"{_dinero(_precio)} / {_f.get('Unidad')}",
+                            "Mercado (mín – máx)": (
+                                f"{_dinero(_mdo['minimo'])} – {_dinero(_mdo['maximo'])}"
+                                if _mdo.get("minimo") is not None else "—"
+                            ),
+                            "Precio": _ver,
+                            "Cantidad": _cant_txt,
+                            "Qué hacer": " · ".join(dict.fromkeys(_acciones)),
+                            "Importe en juego": " · ".join(_en_juego) or "—",
+                        })
+
+                    _importe_total = float(pd.to_numeric(tabla["Importe"], errors="coerce").fillna(0).sum()) or float(
+                        sum((convertir_numero(f.get("Cantidad")) or 0) * f.get("Precio cotizado") for f in filas)
+                    )
+                    _n_accion = sum(1 for r in filas_resumen if not r["Qué hacer"].startswith("Sin acción"))
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Importe cotizado", f"${_importe_total:,.0f}")
+                    k2.metric("Partidas que requieren acción", f"{_n_accion} de {len(filas_resumen)}")
+                    k3.metric(
+                        "Importe en juego (orientativo)",
+                        f"${total_precio_revisar + total_cant_min:,.0f} – ${total_precio_revisar + total_cant_max:,.0f}",
+                        help=(
+                            "Diferencia de precio contra la referencia (validada u orientativa) más el rango de "
+                            "cantidades por aclarar. No es ahorro confirmado: depende de la respuesta del proveedor."
+                        ),
+                    )
+                    st.dataframe(pd.DataFrame(filas_resumen), use_container_width=True, hide_index=True)
+
+                    _mensajes = []
+                    for _r in filas_resumen:
+                        if _r["Importe en juego"] != "—":
+                            _mensajes.append(f"**Partida {_r['#']}** ({str(_r['Concepto'])[:45].lower()}…): "
+                                             f"{_r['Precio'].split(' (')[0]}; {_r['Qué hacer'].lower()} — en juego {_r['Importe en juego']}.")
+                    if _mensajes:
+                        st.markdown("**Hallazgos principales**")
+                        for _msg in _mensajes:
+                            st.markdown(f"- {_msg}")
+                    st.markdown(f"- **IVA:** {revision_cant['alcances_confirmar'][0].split('IVA: ')[-1]}")
+                    st.caption(
+                        "Precio validado = referencia con concepto confirmado por IA, especificaciones declaradas y "
+                        "precio vigente. Orientativo = datos reales de mercado (NL/CDMX) sin equivalencia exacta "
+                        "demostrada. El detalle de cada fuente, las cantidades y la evidencia están en las otras pestañas."
+                    )
+                    _err_busq = (busqueda_mercado_ia.ultimo_error() or {}).get("mensaje")
+                    if busqueda_ia_disponible and buscar_precios_web and _err_busq:
+                        st.caption("ℹ️ La búsqueda de precios con IA tuvo un problema; ver pestaña «Evidencia y estado de la IA».")
+
+                with tab_fuente:
+                    # Precio caro/en rango/bajo -- pedido explícito de dirección:
+                    # ALTO (caro) = rojo, EN MERCADO (en rango) = amarillo,
+                    # BAJO (por debajo del precio de referencia) = verde.
+                    def resaltar(valor):
+
+                        if valor == "ALTO":
+                            return (
+                                "background-color: #f7c1c1; "
+                                "color: #501313"
+                            )
+
+                        if valor == "EN MERCADO":
+                            return (
+                                "background-color: #ffe699; "
+                                "color: #7f6000"
+                            )
+
+                        if valor == "BAJO":
+                            return (
+                                "background-color: #c6e0b4; "
+                                "color: #006100"
+                            )
+
+                        if (
+                            valor
+                            == "SIN DATOS SUFICIENTES"
+                        ):
+                            return (
+                                "background-color: #d9d9d9; "
+                                "color: #595959"
+                            )
+
+                        return ""
+
+                    # Confianza del TEXTO encontrado (qué tan seguro está el
+                    # sistema de que el match es el mismo material) -- también
+                    # pedido de dirección, en sentido contrario al de arriba:
+                    # ALTA confianza = bueno = verde, BAJA confianza = hay que
+                    # revisar a mano = rojo.
+                    def resaltar_confianza(valor):
+
+                        if valor == "ALTA":
+                            return (
+                                "background-color: #c6e0b4; "
+                                "color: #006100"
+                            )
+
+                        if valor == "MEDIA":
+                            return (
+                                "background-color: #ffe699; "
+                                "color: #7f6000"
+                            )
+
+                        if valor == "BAJA":
+                            return (
+                                "background-color: #f7c1c1; "
+                                "color: #501313"
+                            )
+
+                        return ""
+
+                    def resaltar_diferencia(valor):
+
+                        if valor is None or pd.isna(valor):
+                            return ""
+
+                        if valor > 0:
+                            return "color: #c0392b"
+
+                        if valor < 0:
+                            return "color: #1e8449"
+
+                        return ""
+
+                    # ------------------------------------------------------------
+                    # Vista simple (default) vs. vista avanzada: con 4 fuentes,
+                    # cada una con su match/confiabilidad/precio/resultado/
+                    # diferencia, la tabla completa llega a tener ~25-30
+                    # columnas -- demasiado para leer de un vistazo. Por default
+                    # se muestra solo lo que hace falta para decidir (veredicto
+                    # combinado + qué tan lejos está del mercado); quien quiera
+                    # ver POR QUÉ se llegó a ese veredicto (con qué coincidió
+                    # cada fuente, su confiabilidad, su precio) puede activar la
+                    # vista avanzada con el mismo detalle de siempre.
+                    # ------------------------------------------------------------
+                    st.markdown("#### Comparativo por partida")
+                    st.caption(
+                        "Precio de cada fuente: 🔴 cotizado caro · 🟡 en mercado (±5 %) · 🟢 cotizado "
+                        "barato, solo cuando la Confiabilidad dice VALIDADA (concepto confirmado por IA, "
+                        "especificaciones declaradas y coincidentes, precio vigente ≤12 meses). Gris en cursiva = "
+                        "orientativo (EQUIVALENCIA PARCIAL / POR CONFIRMAR / NO CONCLUYENTE). Tachado = RECHAZADA. "
+                        "Sin referencia validada, la diferencia se reporta como pendiente de validar, no como ahorro."
+                    )
+
+                    _FUENTES = (("historico", "Histórico"), ("nl", "Nuevo León"),
+                                ("cdmx", "CDMX"), ("ia", "IA internet"))
+                    _SEMAFORO = {
+                        "ALTO": "🔴 Caro",
+                        "EN MERCADO": "🟡 En mercado",
+                        "BAJO": "🟢 Barato",
+                        "MIXTO": "🟠 Mixto (fuentes discrepan)",
+                        "NO CONCLUYENTE": "⚪ No concluyente",
+                        "SIN DATOS SUFICIENTES": "⚪ Sin referencia validada",
+                    }
+
+                    def _dinero(valor):
+                        return f"${valor:,.2f}" if valor is not None and pd.notna(valor) else "—"
+
+                    registros_vista = []
+                    estilos_vista = []
+                    for _, f in tabla.iterrows():
+                        evs = f["_evaluaciones"]
+                        fin_ = f["_final"]
+                        fila_v = {
+                            "# Concepto": f.get("Partida"),
+                            "Descripción": f.get("Concepto") or "Descripción no detectada",
+                            "Unidad": f.get("Unidad"),
+                            "Cantidad": f.get("Cantidad"),
+                            "Precio": _dinero(f.get("Precio cotizado")),
+                            "Precio total": _dinero(
+                                f.get("Importe") if pd.notna(f.get("Importe")) else
+                                (convertir_numero(f.get("Cantidad")) or 0) * f.get("Precio cotizado")
+                            ),
+                        }
+                        estilo_v = {}
+                        # Misma estructura de siempre por fuente: Descripción,
+                        # Precio y Confiabilidad (que ahora dice si la referencia
+                        # quedó VALIDADA, POR CONFIRMAR, RECHAZADA...).
+                        _NOMBRE_COL = {"historico": ("histórico Ragasa", "histórico"),
+                                       "nl": ("Nuevo León", "Nuevo León"),
+                                       "cdmx": ("CDMX", "CDMX"), "ia": ("IA", "IA")}
+                        for clave, nombre in _FUENTES:
+                            ev = evs[clave]
+                            _largo, _corto = _NOMBRE_COL[clave]
+                            col_desc = f"Descripción {_largo}"
+                            col_p, col_e = f"Precio {_corto}", f"Confiabilidad {_corto}"
+                            fila_v[col_desc] = ev.get("descripcion") or "—"
+                            fila_v[col_p] = _dinero(ev["precio_referencia"])
+                            fila_v[col_e] = ev["estado"] if ev["estado"] != validacion.SIN_DATO else "—"
+                            if ev["estado"] == validacion.VALIDADA:
+                                estilo_v[col_p] = {
+                                    "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 650",
+                                    "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 650",
+                                    "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 650",
+                                }.get(ev["clasificacion"], "")
+                                estilo_v[col_e] = "color: #14532d; font-weight: 650"
+                            elif ev["estado"] == validacion.RECHAZADA:
+                                estilo_v[col_p] = "color: #98a2b3; text-decoration: line-through"
+                                estilo_v[col_e] = "color: #b42318; font-weight: 650"
+                            elif ev["estado"] in validacion.ORIENTATIVAS:
+                                estilo_v[col_p] = "background-color: #f1f3f5; color: #60666d; font-style: italic"
+                                estilo_v[col_e] = "color: #8a6100"
+                            else:
+                                estilo_v[col_e] = "color: #98a2b3"
+                        _texto_final = _SEMAFORO.get(fin_["semaforo"], fin_["semaforo"])
+                        if fin_["semaforo"] in ("ALTO", "BAJO", "EN MERCADO") and fin_["fuentes_validadas"]:
+                            _texto_final += f" · según {fin_['fuentes_validadas']}"
+                        _nombres_clas = {"ALTO": "caro", "BAJO": "barato", "EN MERCADO": "en mercado"}
+                        if fin_["semaforo"] == "MIXTO":
+                            # Decir qué dice cada fuente en vez de solo "mixto".
+                            _texto_final = "🟠 " + " · ".join(
+                                f"{_nombres_clas.get(ev['clasificacion'], ev['clasificacion'])} vs {nombre}"
+                                for clave, nombre in _FUENTES
+                                for ev in [evs[clave]] if ev["estado"] == validacion.VALIDADA
+                            )
+                        elif fin_["semaforo"] in ("NO CONCLUYENTE", "SIN DATOS SUFICIENTES"):
+                            # Pista orientativa (no decide): qué dicen las referencias no validadas.
+                            _pistas = [
+                                f"{nombre} {ev['diferencia_pct']:+.0f}%"
+                                for clave, nombre in _FUENTES
+                                for ev in [evs[clave]]
+                                if ev["estado"] in validacion.ORIENTATIVAS
+                                and ev["diferencia_pct"] is not None
+                            ]
+                            if _pistas:
+                                _texto_final += " (orientativo: " + ", ".join(_pistas) + ")"
+                        fila_v["Semáforo"] = _texto_final
+                        _respaldo = "validada" if fin_["respaldo"] == "VALIDADA" else "pendiente de validar"
+                        fila_v["Precio de referencia"] = (
+                            f"{_dinero(fin_['precio_negociacion'])} ({fin_['referencia_negociacion']} · {_respaldo})"
+                            if fin_["precio_negociacion"] else "—"
+                        )
+                        fila_v["% diferencia"] = (
+                            f"{fin_['diferencia_pct']:+.1f}%" if fin_["diferencia_pct"] is not None else "—"
+                        )
+                        if fin_["respaldo"] == "VALIDADA":
+                            _etiqueta_dif = {
+                                "ALTO": "ahorro respaldado", "EN MERCADO": "dentro de mercado (±5 %)",
+                                "BAJO": "cotizado por debajo",
+                            }.get(fin_["semaforo"], "fuentes validadas discrepan")
+                        else:
+                            _etiqueta_dif = "pendiente de validar"
+                        fila_v["Diferencia contra referencia"] = (
+                            f"{_dinero(fin_['diferencia_importe'])} · {_etiqueta_dif}"
+                            if fin_["diferencia_importe"] is not None else "—"
+                        )
+                        estilo_v["Semáforo"] = {
+                            "ALTO": "background-color: #f8c9c9; color: #712121; font-weight: 700",
+                            "BAJO": "background-color: #ccebd2; color: #14532d; font-weight: 700",
+                            "EN MERCADO": "background-color: #fff0bb; color: #705000; font-weight: 700",
+                            "MIXTO": "background-color: #fde7d2; color: #7a3e00; font-weight: 700",
+                        }.get(fin_["semaforo"], "background-color: #e4e7eb; color: #475467")
+                        if fin_["ahorro_potencial"]:
+                            estilo_v["Diferencia contra referencia"] = "color: #712121; font-weight: 650"
+                        elif fin_["diferencia_importe"]:
+                            estilo_v["Diferencia contra referencia"] = "color: #60666d; font-style: italic"
+                        registros_vista.append(fila_v)
+                        estilos_vista.append(estilo_v)
+
+                    comparativo_vista = pd.DataFrame(registros_vista)
+                    _estilos_df = pd.DataFrame(estilos_vista, index=comparativo_vista.index).reindex(
+                        columns=comparativo_vista.columns
+                    ).fillna("")
+                    st.dataframe(
+                        comparativo_vista.style.apply(lambda _d: _estilos_df, axis=None),
+                        use_container_width=True,
+                        height=min(680, 48 + 36 * len(comparativo_vista)),
+                        hide_index=True,
+                    )
+
+
+                with tab_cant:
+                    st.markdown("#### Revisión de cantidades y aritmética")
+                    if revision_cant["partidas_con_error"] == 0 and revision_cant["total_ok"]:
+                        st.success(
+                            f"Aritmética correcta: cantidad × P.U. cuadra en todas las partidas y el total "
+                            f"es ${revision_cant['total_calculado']:,.2f}."
+                        )
+                    else:
+                        st.error(
+                            f"Aritmética con diferencias: {revision_cant['partidas_con_error']} partida(s) no cuadran "
+                            f"o el total no coincide (calculado ${revision_cant['total_calculado']:,.2f})."
+                        )
+                        st.dataframe(
+                            pd.DataFrame([a for a in revision_cant["aritmetica"] if not a["ok"]]),
+                            use_container_width=True, hide_index=True,
+                        )
+                    _iconos = {"REVISAR": "🔴", "CONFIRMAR": "🟡", "OK": "🟢"}
+                    for h in revision_cant["hallazgos"]:
+                        st.markdown(f"{_iconos.get(h['nivel'], '•')} **{h['tipo']}** (partida {h['partidas']}): {h['detalle']}")
+                        if h["escenarios"]:
+                            st.dataframe(
+                                pd.DataFrame([{
+                                    "Escenario": e["nombre"], "Fórmula": e["formula"], "m² esperados": e["m2"],
+                                    "Diferencia vs cotizado (m²)": e["dif_m2"],
+                                    "Importe sujeto a aclaración": f"${e['importe']:,.2f}",
+                                } for e in h["escenarios"]]),
+                                use_container_width=True, hide_index=True,
+                            )
+
+                    with st.expander("Alcances e impuestos a confirmar con el proveedor"):
+                        for a in revision_cant["alcances_confirmar"]:
+                            st.markdown(f"- {a}")
+                        st.caption("No son omisiones comprobadas: confirmar por escrito antes de emitir la orden de compra.")
+
+
+                with tab_mdo:
+                    st.markdown("#### Datos de mercado para comparar")
+                    st.caption(
+                        "Precios reales publicados (NL: licitaciones de obra pública, mediana y rango p25–p75, "
+                        "ajustados por INPC; CDMX: tabulador oficial 2026). Sirven para ubicar el precio cotizado "
+                        "aunque la equivalencia exacta no esté demostrada. Se excluyen materiales distintos y cifras "
+                        "de otra escala."
+                    )
                     st.dataframe(
                         pd.DataFrame([{
                             "#": r["partida"],
-                            "Fuente": r["fuente"],
-                            "Concepto de referencia": r["concepto"],
-                            "Relación": r["relacion"],
+                            "Concepto": r["concepto"],
                             "Unidad": r["unidad"],
-                            "Precio (mediana)": _dinero(r["precio"]),
-                            "Rango p25–p75": (f"{_dinero(r['rango_bajo'])} – {_dinero(r['rango_alto'])}"
-                                              if r.get("rango_bajo") else "—"),
-                            "Registros": r["n_registros"],
-                            "Periodo / fecha": r["fecha"],
-                            "Equivalencia": r["equivalencia"],
-                            "Cotizado vs referencia": r["posicion"],
-                        } for r in datos_mdo["referencias"]]),
+                            "P.U. cotizado": _dinero(r["precio_cotizado"]),
+                            "Referencias": f"{r['referencias']} ({r['tipo']})",
+                            "Mínimo observado": _dinero(r["minimo"]),
+                            "Mediana de referencias": _dinero(r["mediana_referencias"]),
+                            "Máximo observado": _dinero(r["maximo"]),
+                            "vs mediana": f"{r['vs_mediana_pct']:+.1f}%" if r["vs_mediana_pct"] is not None else "—",
+                            "Dónde cae el cotizado": r["posicion"],
+                        } for r in datos_mdo["resumen"]]),
                         use_container_width=True, hide_index=True,
                     )
+                    with st.expander("Ver cada referencia de mercado (concepto, precio, rango, registros, fecha)"):
+                        st.dataframe(
+                            pd.DataFrame([{
+                                "#": r["partida"],
+                                "Fuente": r["fuente"],
+                                "Concepto de referencia": r["concepto"],
+                                "Relación": r["relacion"],
+                                "Unidad": r["unidad"],
+                                "Precio (mediana)": _dinero(r["precio"]),
+                                "Rango p25–p75": (f"{_dinero(r['rango_bajo'])} – {_dinero(r['rango_alto'])}"
+                                                  if r.get("rango_bajo") else "—"),
+                                "Registros": r["n_registros"],
+                                "Periodo / fecha": r["fecha"],
+                                "Equivalencia": r["equivalencia"],
+                                "Cotizado vs referencia": r["posicion"],
+                            } for r in datos_mdo["referencias"]]),
+                            use_container_width=True, hide_index=True,
+                        )
 
-                with st.expander("Evidencia por fuente (por qué cada referencia cuenta o no)"):
-                    evidencia = []
-                    for _, f in tabla.iterrows():
-                        for clave, nombre in _FUENTES:
-                            ev = f["_evaluaciones"][clave]
-                            evidencia.append({
-                                "#": f.get("Partida"),
-                                "Concepto": f.get("Concepto"),
-                                "Fuente": nombre,
-                                "Estado": ev["estado"],
-                                "Motivo / verificaciones": ev["motivo"],
-                                "Concepto encontrado": ev.get("descripcion") or "—",
-                                "P.U. referencia": _dinero(ev["precio_referencia"]),
-                                "Revisión IA": ev.get("revision_ia") or "—",
-                                "Evidencia web": ev.get("evidencia") or "—",
-                            })
-                    st.dataframe(pd.DataFrame(evidencia), use_container_width=True, hide_index=True)
-                    st.caption(
-                        "RECHAZA (o material/especificación distinta) excluye la referencia. NO_SEGURO la deja "
-                        "como orientativa. CONFIRMA no basta: para VALIDADA el proveedor debe declarar las "
-                        "especificaciones de la referencia (sección, espesor, f'c…) y el precio debe ser vigente "
-                        "(≤12 meses). Si el concepto coincide pero falta algo: EQUIVALENCIA PARCIAL. La escala "
-                        "(5×) solo filtra cifras extremas."
+
+                with tab_evid:
+                    _pendiente_total = sum(
+                        max(0.0, f["_final"]["diferencia_importe"] or 0)
+                        for f in filas if f["_final"].get("respaldo") == "PENDIENTE DE VALIDAR"
                     )
+                    if _pendiente_total:
+                        st.caption(
+                            f"Además hay ${_pendiente_total:,.2f} de diferencia contra referencias "
+                            "pendientes de validar (no es ahorro respaldado hasta confirmar especificación y vigencia)."
+                        )
+
+                    # ----------------------------------------------------------
+                    # ESTADO DE LA IA, visible (antes quedaba escondido en un
+                    # recuadro cerrado): dice en palabras simples si la revisión
+                    # y la búsqueda con IA de verdad corrieron y, si no, por qué.
+                    # ----------------------------------------------------------
+                    def _causa_simple(mensaje):
+                        t = str(mensaje or "").lower()
+                        if any(x in t for x in ("429", "resource_exhausted", "quota", "rate limit")):
+                            return ("se acabó la cuota gratuita de Gemini por ahora (se renueva cada día; "
+                                    "también hay límite por minuto)")
+                        if any(x in t for x in ("api key not valid", "api_key_invalid", "invalid api key", "401")):
+                            return "la clave de Gemini (gemini_api_key) no es válida"
+                        if "403" in t or "permission" in t or "billing" in t:
+                            return ("Google no permite esta función con tu clave (puede requerir facturación "
+                                    "activada para la búsqueda con Google)")
+                        if any(x in t for x in ("404", "not_found", "not found")):
+                            return "el modelo de Gemini no está disponible para tu clave"
+                        if "ningún precio pasó la validación" in t:
+                            return "Gemini sí buscó, pero ningún precio tenía fuente y frase comprobables"
+                        if "json" in t:
+                            return "Gemini respondió en un formato que no se pudo leer"
+                        return str(mensaje)[:200]
+
+                    _n_revisadas = sum(
+                        1 for f in filas for clave in ("nl", "cdmx", "historico")
+                        if (f["_evaluaciones"][clave].get("revision_ia"))
+                    )
+                    _n_por_revisar = sum(
+                        1 for f in filas for clave in ("nl", "cdmx", "historico")
+                        if f["_evaluaciones"][clave]["estado"] not in (validacion.SIN_DATO,)
+                    )
+                    _motores = [
+                        str((registro.get("busqueda_ia") or {}).get("motor", ""))
+                        for registro in fila_registros
+                        if (registro.get("busqueda_ia") or {}).get("tiene_dato")
+                    ]
+                    _n_gemini = sum(1 for m in _motores if m.startswith("Gemini"))
+                    _n_tavily = sum(1 for m in _motores if m.startswith("Tavily"))
+                    _error_revision = (revision_ia.ultimo_error() or {}).get("mensaje") if usar_ia else None
+                    _error_busqueda = (
+                        (busqueda_mercado_ia.ultimo_error() or {}).get("mensaje")
+                        if busqueda_ia_disponible and buscar_precios_web else None
+                    )
+
+                    with st.container(border=True):
+                        st.markdown("**Estado de la IA en esta revisión**")
+                        if not usar_ia:
+                            st.warning("Revisión con IA: **apagada**. Actívala en la barra lateral; "
+                                       "sin ella casi ninguna referencia puede quedar VALIDADA.")
+                        elif _n_revisadas:
+                            st.success(f"Revisión con IA: activa, {_n_revisadas} referencia(s) revisada(s) por la IA.")
+                            if _error_revision:
+                                st.caption(f"Algunas no se revisaron: {_causa_simple(_error_revision)}.")
+                        else:
+                            st.error("Revisión con IA: **no se pudo hacer**. Causa: "
+                                     f"{_causa_simple(_error_revision) if _error_revision else 'la IA no respondió'}.")
+
+                        if not busqueda_ia_disponible:
+                            st.warning("Búsqueda de precios con IA: no configurada (falta gemini_api_key en Secrets).")
+                        elif not buscar_precios_web:
+                            st.info("Búsqueda de precios con IA: apagada en la barra lateral.")
+                        elif _n_gemini:
+                            st.success(f"Búsqueda de precios con IA: Gemini encontró {_n_gemini} precio(s) con fuente.")
+                            if _n_tavily:
+                                st.caption(f"Otros {_n_tavily} vinieron del buscador de respaldo (orientativos).")
+                        else:
+                            _txt = ("Búsqueda de precios con IA: **Gemini no entregó precios**. Causa: "
+                                    f"{_causa_simple(_error_busqueda) if _error_busqueda else 'no encontró fuentes comprobables'}.")
+                            if _n_tavily:
+                                _txt += f" Se usaron {_n_tavily} precio(s) del buscador de respaldo, solo como orientativos."
+                            st.error(_txt)
+
+                        if _error_revision or _error_busqueda:
+                            with st.expander("Detalle técnico (para soporte)"):
+                                if _error_revision:
+                                    st.code(f"Revisión IA: {_error_revision}", language=None)
+                                if _error_busqueda:
+                                    st.code(f"Búsqueda IA: {_error_busqueda}", language=None)
+
+                with tab_evid:
+                    with st.expander("Evidencia por fuente (por qué cada referencia cuenta o no)"):
+                        evidencia = []
+                        for _, f in tabla.iterrows():
+                            for clave, nombre in _FUENTES:
+                                ev = f["_evaluaciones"][clave]
+                                evidencia.append({
+                                    "#": f.get("Partida"),
+                                    "Concepto": f.get("Concepto"),
+                                    "Fuente": nombre,
+                                    "Estado": ev["estado"],
+                                    "Motivo / verificaciones": ev["motivo"],
+                                    "Concepto encontrado": ev.get("descripcion") or "—",
+                                    "P.U. referencia": _dinero(ev["precio_referencia"]),
+                                    "Revisión IA": ev.get("revision_ia") or "—",
+                                    "Evidencia web": ev.get("evidencia") or "—",
+                                })
+                        st.dataframe(pd.DataFrame(evidencia), use_container_width=True, hide_index=True)
+                        st.caption(
+                            "RECHAZA (o material/especificación distinta) excluye la referencia. NO_SEGURO la deja "
+                            "como orientativa. CONFIRMA no basta: para VALIDADA el proveedor debe declarar las "
+                            "especificaciones de la referencia (sección, espesor, f'c…) y el precio debe ser vigente "
+                            "(≤12 meses). Si el concepto coincide pero falta algo: EQUIVALENCIA PARCIAL. La escala "
+                            "(5×) solo filtra cifras extremas."
+                        )
+
 
                 # Configuración con la que se generó esta revisión (queda
                 # registrada en el CSV y en el Excel para poder comparar pruebas).
