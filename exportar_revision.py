@@ -159,7 +159,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     cab_ini = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado"]
     sub_fuente = ["P.U. ref.", "Diferencia $/u", "% vs ref.", "Dictamen", "Confiabilidad"]
     NF = len(sub_fuente)
-    cab_fin = ["Semáforo final", "Referencia", "Respaldo", "P.U. de referencia",
+    cab_fin = ["Resultado de los 4 filtros", "Referencia", "Respaldo", "P.U. de referencia",
                "% vs referencia", "Diferencia contra referencia", "Ahorro respaldado", "Nota"]
     n_cols = len(cab_ini) + NF * len(FUENTES) + len(cab_fin)
     ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
@@ -236,11 +236,24 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         for x, c in reversed(list(zip(es_val, clase))):
             primera = f"IF({x},{c},{primera})"
         iguales = ",".join(f"OR(NOT({x}),{c}={primera})" for x, c in zip(es_val, clase))
-        f_sem = (f'=IF(({n_val})=0,IF(({n_ori})>0,"{v.NO_CONCLUYENTE}","{v.SIN_VALIDADA}"),'
-                 f'IF(AND({iguales}),IF({primera}="caro","ALTO",IF({primera}="barato","BAJO","EN MERCADO")),"MIXTO"))')
-        semaforo = fin.get("semaforo") or v.SIN_VALIDADA
-        ws.write_formula(r, c_fin, f_sem, f_semaforo.get(semaforo, f_semaforo["OTRO"]), semaforo)
-        semaforo_cf(ws, f"{xl_col_to_name(c_fin)}{R}")
+        nc = "+".join(f'(RIGHT({d},4)="caro")' for d in celdas_dict)
+        ne = "+".join(f'(RIGHT({d},10)="en mercado")' for d in celdas_dict)
+        nb = "+".join(f'(RIGHT({d},6)="barato")' for d in celdas_dict)
+        nt = f"(({nc})+({ne})+({nb}))"
+        sufijo = f'&" de "&{nt}&IF({nt}>1," filtros"," filtro")'
+        f_res = (f'=IF({nt}=0,"Sin datos",'
+                 f'IF(AND(({nc})>({ne}),({nc})>({nb})),"Caro en "&({nc}){sufijo},'
+                 f'IF(AND(({ne})>({nc}),({ne})>({nb})),"En precio en "&({ne}){sufijo},'
+                 f'IF(AND(({nb})>({nc}),({nb})>({ne})),"Barato en "&({nb}){sufijo},'
+                 f'"Los filtros no coinciden"))))')
+        rf = v.resultado_filtros(evs)
+        texto_rf = rf["texto"].split(" ", 1)[1] if rf["clave"] else "Sin datos"
+        ws.write_formula(r, c_fin, f_res, f_semaforo.get(rf["clave"] or "OTRO", f_semaforo["OTRO"]), texto_rf)
+        for palabra, color_f, color_t in (("Caro", ROJO_F, ROJO_T), ("Barato", VERDE_F, VERDE_T),
+                                          ("En precio", AMBAR_F, AMBAR_T)):
+            ws.conditional_format(f"{xl_col_to_name(c_fin)}{R}", {
+                "type": "text", "criteria": "begins with", "value": palabra,
+                "format": wb.add_format({"bg_color": color_f, "font_color": color_t, "bold": True})})
 
         nombres = [v.NOMBRE_FUENTE[k] for k in FUENTES]
         f_ref_txt = '"—"'
@@ -250,10 +263,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             f_ref_txt = f'IF({x},"{nombre}",{f_ref_txt})'
         col_refn = xl_col_to_name(c_fin + 1)
         ws.write_formula(r, c_fin + 1, "=" + f_ref_txt, f_txt, fin.get("referencia_negociacion") or "—")
-        respaldo = fin.get("respaldo") or "—"
+        respaldo = "VALIDADA" if rf["validados"] else ("POR VALIDAR" if rf["n"] else "—")
         ws.write_formula(
             r, c_fin + 2,
-            f'=IF(({n_val})>0,"VALIDADA",IF({col_refn}{R}<>"—","PENDIENTE DE VALIDAR","—"))',
+            f'=IF(({n_val})>0,"VALIDADA",IF({nt}>0,"POR VALIDAR","—"))',
             f_estado.get(v.VALIDADA if respaldo == "VALIDADA" else v.NO_CONCLUYENTE, f_centro), respaldo)
         f_pu = '""'
         for celda, nombre in reversed(list(zip(celdas_ref, nombres))):
@@ -509,7 +522,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wf.write_formula(
                 r, c0 + 3,
                 f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin referencia",IF({ce}{R}="RECHAZADA","Rechazada",'
-                f'IF({ce}{R}="VALIDADA","Validado · ","Orientativo · ")&{clas}))',
+                f'IF(AND({ce}{R}<>"VALIDADA",OR({cr}{R}>D{R}*{v.FACTOR_ESCALA:g},{cr}{R}<D{R}/{v.FACTOR_ESCALA:g})),'
+                f'"Fuera de escala",IF({ce}{R}="VALIDADA","Validado · ","Orientativo · ")&{clas})))',
                 f_centro, v.dictamen_texto(ev))
             conf_orient = v.confiabilidad_texto(dict(ev, estado=v.NO_CONCLUYENTE)) if ref is not None else "—"
             wf.write_formula(
@@ -599,8 +613,9 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                        "fuente y frase verificadas puede quedar VALIDADO."),
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
                           "Histórico Ragasa > Nuevo León > CDMX > IA internet."),
-        ("Semáforo final", "Todas las validadas coinciden = ese semáforo. Si discrepan = MIXTO. Sin validadas pero con orientativas = "
-                           "NO CONCLUYENTE. Sin nada = SIN DATOS SUFICIENTES. EN MERCADO = ±5 % de la referencia."),
+        ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen caro, en precio (±5 %) o barato; gana la mayoría y, "
+                                       "si empatan, 'Los filtros no coinciden'. No promedia precios. 'Respaldo' dice si "
+                                       "hay al menos una referencia validada."),
         ("Nuevo León", "Mediana del tabulador homologado de licitaciones de NL, actualizada a hoy con INPC (INEGI)."),
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),
         ("Histórico Ragasa", "Cotizaciones guardadas previamente en el histórico interno (Google Sheets)."),

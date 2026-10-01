@@ -458,6 +458,8 @@ def dictamen_texto(ev: dict) -> str:
     if estado == VALIDADA:
         return f"Validado · {clas}" if clas else "Validado"
     if estado in ORIENTATIVAS:
+        if "fuera de escala" in str(ev.get("motivo") or ""):
+            return "Fuera de escala"
         return f"Orientativo · {clas}" if clas else "Orientativo"
     if estado == RECHAZADA:
         return "Rechazada"
@@ -496,3 +498,39 @@ def falta_confirmar(ev: dict, concepto: str) -> str:
     elif "meses" in motivo or "fecha del precio no disponible" in motivo:
         partes.append("vigencia del precio")
     return "; ".join(dict.fromkeys(p for p in partes if p)) or motivo
+
+
+def cuenta_filtro(ev: dict) -> bool:
+    """El filtro aporta un dictamen: validado u orientativo, con precio en
+    la misma escala (se excluyen rechazadas, sin dato y fuera de escala)."""
+    return (
+        ev.get("estado") in (VALIDADA,) + ORIENTATIVAS
+        and bool(ev.get("clasificacion"))
+        and "fuera de escala" not in str(ev.get("motivo") or "")
+    )
+
+
+def resultado_filtros(evaluaciones: dict) -> dict:
+    """Lectura simple de los 4 filtros: cuántos dicen caro / en precio /
+    barato. No promedia precios; solo cuenta dictámenes. Si ninguno está
+    validado, el resultado es orientativo ('por validar')."""
+    usados = [e for e in evaluaciones.values() if cuenta_filtro(e)]
+    conteo = {c: sum(1 for e in usados if e["clasificacion"] == c) for c in (ALTO, EN_MERCADO, BAJO)}
+    validados = sum(1 for e in usados if e["estado"] == VALIDADA)
+    n = len(usados)
+    if not n:
+        return {"clave": None, "texto": "⚪ Sin datos", "detalle": "ningún filtro encontró un precio comparable",
+                "n": 0, "conteo": conteo, "validados": 0}
+    mayor = max(conteo.values())
+    ganadores = [c for c, k in conteo.items() if k == mayor]
+    etiqueta = {ALTO: "🔴 Caro", EN_MERCADO: "🟡 En precio", BAJO: "🟢 Barato"}
+    if len(ganadores) > 1:
+        clave, texto = "MIXTO", "🟠 Los filtros no coinciden"
+    else:
+        clave = ganadores[0]
+        texto = f"{etiqueta[clave]} en {mayor} de {n} filtro{'s' if n > 1 else ''}"
+    return {
+        "clave": clave, "texto": texto,
+        "detalle": "validado" if validados else "orientativo · por validar",
+        "n": n, "conteo": conteo, "validados": validados,
+    }
