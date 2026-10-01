@@ -199,7 +199,7 @@ _FUNCION = (
     ("desplante / cimentación", r"desplante|cimentacion|zapata|contratrabe|cimiento"),
     ("provisional", r"provisional|temporal|tapial|obra falsa"),
     ("demolición / retiro", r"demolicion|desmantelamiento|\bretiro de\b|desmontaje"),
-    ("reparación", r"reparacion|resane|rehabilitacion de"),
+    ("reparación", r"\breparacion de\b|\brehabilitacion de\b"),
     ("fachada / divisorio ligero", r"tablaroca|tablacemento|durock|panel de yeso|drywall|muro divisorio de panel"),
 )
 # Material principal: si ambos lo declaran, debe coincidir.
