@@ -158,25 +158,31 @@ def _inflacion_nl(nl: dict) -> dict:
                     f"{r.get('licitacion') or ''} del {r.get('fecha')} (${r.get('precio'):,.2f})" for r in regs)
                 + f". Cada uno se actualizó con el INPC de su mes ({fuente_indice}) y se promedió; factor efectivo."),
         }
-    if usados and metodo.startswith("cada uno"):
-        mensual = bool(ajuste_inflacion._SERIE_MENSUAL)
+    todos = nl.get("registros_todos") or []
+    if todos:
         original = nl.get("precio_mediana") or 0
         ajustada = nl.get("precio_mediana_ajustada") or 0
+        # La explicación sale de lo que realmente se hizo con cada renglón.
+        metodos = {}
+        for r in todos:
+            metodos[r.get("metodo_indice")] = metodos.get(r.get("metodo_indice"), 0) + 1
+        texto_metodos = "; ".join(f"{n} renglón(es): {m}" for m, n in metodos.items())
+        meses = sorted({r.get("fecha", "")[:7] for r in todos})
         return {
             "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
-            "periodo_base": f"mes de cada contrato ({str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]})",
+            "periodo_base": f"mes de cada renglón ({meses[0]} a {meses[-1]})",
             "valor_base": None,
             "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
             "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
             "factor": round(ajustada / original, 4) if original else None,
             "justificacion": (
-                f"{nl.get('n_renglones') or usados} renglones equivalentes (misma unidad, texto casi idéntico, sin "
-                "especificaciones en conflicto y sin cifras atípicas) de "
-                f"{nl.get('n_registros')} contrato(s) distintos (OCID). Cada renglón se actualizó con el INPC de su "
-                f"propio mes ({fuente_indice}); luego se tomó la mediana de cada contrato (la base no trae el número "
-                "de partida, así que varios renglones de un mismo contrato cuentan como una sola observación) y "
-                "después la mediana entre contratos. El factor mostrado es el efectivo. Todos los renglones, con "
-                "índice base, factor y precio actualizado, están en la hoja 'Inflación NL' del Excel."
+                f"P.U. NL = mediana de las medianas por contrato (cada contrato pesa lo mismo). Se usaron "
+                f"{len(todos)} renglones técnicamente equivalentes (mismo objeto, función, material, unidad y "
+                f"especificaciones compatibles) de {nl.get('n_registros')} contrato(s) (OCID). Cada renglón se "
+                f"actualizó con el INPC de su mes ({texto_metodos}); después, mediana dentro de cada contrato y "
+                "mediana entre contratos. La base no trae número de partida, por eso varios renglones de un mismo "
+                "contrato cuentan como una sola observación. Factor = efectivo (P.U. actualizado ÷ mediana de "
+                "medianas original). Detalle y fórmulas en la hoja 'Inflación NL'."
             ),
         }
     d = ajuste_inflacion.detalle_ajuste(
@@ -3393,13 +3399,27 @@ if archivo is not None:
                         for p in str(h["partidas"]).split(","):
                             a = next((x for x in revision_cant["aritmetica"] if str(x["partida"]) == p.strip()), None)
                             if a:
-                                _pedir_espec.append(_nombre_corto(a["concepto"]))
+                                _pedir_espec.append(f"{_nombre_corto(a['concepto'])} (medidas y separación)")
+                # Especificaciones que faltan, por partida, para poder validar
+                # las referencias (lo que hay que pedir al proveedor).
+                _specs_pedir = {}
                 for f in filas:
-                    for clave in ("nl", "cdmx", "historico"):
-                        if ("el proveedor no declara" in (f["_evaluaciones"][clave].get("motivo") or "")
-                                or "no declara medidas" in (f["_evaluaciones"][clave].get("motivo") or "")):
-                            _pedir_espec.append(_nombre_corto(f.get("Concepto")))
-                            break
+                    for clave in ("historico", "nl", "cdmx", "ia"):
+                        ev_ = f["_evaluaciones"][clave]
+                        if validacion.estado_simple(ev_) in ("Orientativa", "No comparable") and ev_.get("descripcion"):
+                            falt, _ = validacion.comparar_especificaciones(f.get("Concepto"), ev_.get("descripcion"))
+                            sp = validacion.extraer_especificaciones(ev_.get("descripcion"))
+                            falt += [c for c in validacion.SPECS_TAMANO if sp.get(c)
+                                     and not validacion.extraer_especificaciones(f.get("Concepto")).get(c)]
+                            for x in falt:
+                                nombre_x = next((n_ for n_ in ("sección / medidas", "espesor", "resistencia f'c",
+                                                               "calibre", "capacidad", "diámetro",
+                                                               "refuerzo horizontal", "castillos ahogados",
+                                                               "acabado aparente", "cimbra", "condición de azotea")
+                                                 if x.startswith(n_)), x.split(" (")[0])
+                                _specs_pedir.setdefault(_nombre_corto(f.get("Concepto")), []).append(nombre_x)
+                for k_, v_ in _specs_pedir.items():
+                    _pedir_espec.append(f"{k_} ({', '.join(list(dict.fromkeys(v_))[:4])})")
                 _caras = [_nombre_corto(f.get("Concepto")) for f in filas
                           if f["_final"].get("respaldo") == "VALIDADA" and f["_final"]["semaforo"] == "ALTO"]
                 _partes = []
@@ -3414,9 +3434,16 @@ if archivo is not None:
                         f"${revision_cant['total_calculado']:,.2f}")
                 if _pedir_generador:
                     _partes.append("solicitar " + " y ".join(dict.fromkeys(_pedir_generador)))
-                _espec = [e for e in dict.fromkeys(_pedir_espec)]
+                _agrupado = {}
+                for e_ in _pedir_espec:
+                    nom, _, det = e_.partition(" (")
+                    _agrupado.setdefault(nom, [])
+                    for d_ in det.rstrip(")").split(", "):
+                        if d_ and d_ not in _agrupado[nom]:
+                            _agrupado[nom].append(d_)
+                _espec = [f"{n_} ({', '.join(d_[:4])})" if d_ else n_ for n_, d_ in _agrupado.items()]
                 if _espec:
-                    _partes.append("especificaciones de " + (", ".join(_espec[:-1]) + " y " + _espec[-1] if len(_espec) > 1 else _espec[0]))
+                    _partes.append("pedir especificaciones de " + "; ".join(_espec))
                 if _caras:
                     _partes.append("negociar precio de " + ", ".join(dict.fromkeys(_caras)))
                 if _partes:

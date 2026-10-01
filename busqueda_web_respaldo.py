@@ -28,7 +28,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-TIEMPO_MAX_PARTIDA = 30      # s por partida (búsqueda + lectura de páginas)
+TIEMPO_MAX_PARTIDA = 40      # s por partida (búsqueda + lectura de páginas)
 PAGINAS_POR_CONSULTA = 5
 FACTOR_ESCALA_WEB = 3.0
 UMBRAL_TEXTO = 55            # similitud mínima concepto-renglón (0-100)
@@ -84,7 +84,11 @@ def _unidad_canonica(unidad) -> str:
         return str(unidad or "").strip().upper()
 
 
-MAX_CONSULTAS = 3
+MAX_CONSULTAS = 5
+_UNIDAD_ALTERNA = {
+    "M2": "metro cuadrado", "M3": "metro cubico", "ML": "ml", "PZA": "pza", "KG": "kilogramo",
+    "TON": "ton", "LT": "lt", "JORNAL": "dia",
+}
 
 
 def opciones_catalogo(descripcion: str) -> list[str]:
@@ -110,13 +114,20 @@ def consultas_para(descripcion: str, unidad: str) -> list[str]:
     """Hasta MAX_CONSULTAS búsquedas: primero la región de la cotización
     (Monterrey / Nuevo León), luego México y luego una forma alternativa
     del concepto, por si la primera fuente se rechaza."""
-    u = _UNIDAD_TEXTO.get(_unidad_canonica(unidad), str(unidad or "").lower())
+    uc = _unidad_canonica(unidad)
+    u = _UNIDAD_TEXTO.get(uc, str(unidad or "").lower())
+    u2 = _UNIDAD_ALTERNA.get(uc, u)
     opciones = opciones_catalogo(descripcion) or [descripcion.lower()]
-    consultas = [f"precio unitario {opciones[0]} por {u} Monterrey Nuevo León"]
-    consultas.append(f"precio unitario {opciones[0]} por {u} México")
+    # Región de la cotización, México, sinónimo con unidad equivalente y
+    # fuentes oficiales alternativas (tabuladores de gobierno).
+    consultas = [f"precio unitario {opciones[0]} por {u} Monterrey Nuevo León",
+                 f"precio unitario {opciones[0]} por {u} México"]
     if len(opciones) > 1:
-        consultas.append(f"tabulador precio unitario {opciones[1]} {u}")
-    return consultas[:MAX_CONSULTAS]
+        consultas.append(f"precio {opciones[1]} {u2}")
+    consultas.append(f"tabulador de precios unitarios {opciones[0]} {u} gob.mx")
+    if len(opciones) > 2:
+        consultas.append(f"catálogo de conceptos {opciones[2]} {u2} precio")
+    return list(dict.fromkeys(consultas))[:MAX_CONSULTAS]
 
 
 # ----------------------------------------------------------------------
@@ -478,7 +489,10 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
                      + (f"; se rechazaron {len(rechazadas)} concepto(s) parecido(s) en palabras pero distinto(s): "
                         + " | ".join(f"{r['codigo'] or ''} {r['concepto'][:70]} (${r['precio']:,.2f}) — {r['motivo']}"
                                      for r in sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:3])
-                        if rechazadas else "; ningún renglón tenía el mismo material, trabajo y unidad.")),
+                        if rechazadas else "; ningún renglón tenía el mismo material, trabajo y unidad.")
+                     + " Búsquedas: " + " | ".join(consultas_hechas)
+                     + ". No encontrar una referencia en estas búsquedas no demuestra que no existan precios "
+                       "publicados."),
             "rechazadas": sorted(rechazadas, key=lambda r: -r.get("similitud", 0))[:5],
             "consultas": consultas_hechas, "paginas_revisadas": paginas_leidas,
         }

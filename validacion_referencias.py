@@ -190,12 +190,62 @@ def clave_objeto(texto: str):
     return None
 
 
+# Función del elemento: mismo objeto con distinta función NO es comparable
+# ("muro de block" divisorio/barda vs "muro de contención"; "cerramiento" vs
+# "dala de desplante"). Una etiqueta exclusiva presente en un lado y ausente
+# en el otro descarta la referencia.
+_FUNCION = (
+    ("contención", r"contencion|muro de carga de tierra|talud"),
+    ("desplante / cimentación", r"desplante|cimentacion|zapata|contratrabe|cimiento"),
+    ("provisional", r"provisional|temporal|tapial|obra falsa"),
+    ("demolición / retiro", r"demolicion|desmantelamiento|\bretiro de\b|desmontaje"),
+    ("reparación", r"reparacion|resane|rehabilitacion de"),
+    ("fachada / divisorio ligero", r"tablaroca|tablacemento|durock|panel de yeso|drywall|muro divisorio de panel"),
+)
+# Material principal: si ambos lo declaran, debe coincidir.
+_MATERIAL = (
+    ("mampostería", r"\b(block|bloque|tabique|ladrillo|tabicon|mamposteria)\b"),
+    ("concreto armado", r"\b(muro|losa|castillo|dala|cadena|cerramiento|trabe|columna)s? de concreto\b|concreto armado|armex|varilla"),
+    ("acero / metal", r"\b(metalic[oa]s?|acero estructural|ptr|perfil|lamina|ipr)\b"),
+    ("madera", r"\bmadera\b|triplay"),
+    ("tablaroca / panel", r"tablaroca|tablacemento|durock|panel"),
+)
+
+
+def funcion_material(texto: str) -> dict:
+    # Solo la descripción del concepto: lo que viene después de "incluye"
+    # (retiro de escombro, cimbra, acarreos...) es alcance, no la función.
+    t = re.split(r"\bincluye\b|\bincluyendo\b", _plano(texto))[0]
+    return {
+        "funcion": {n for n, p in _FUNCION if re.search(p, t)},
+        "material": {n for n, p in _MATERIAL if re.search(p, t)},
+    }
+
+
 def alcance_distinto(cotizado: str, referencia: str):
-    """Regresa el motivo si el alcance o material de la referencia no es comparable."""
+    """Regresa el motivo si el alcance o material de la referencia no es comparable.
+    Revisa la descripción completa: objeto, función, material y alcance."""
     original = _plano(cotizado)
     candidato = _plano(referencia)
     if not original or not candidato:
         return None
+    fc, fr = funcion_material(original), funcion_material(candidato)
+    # En acabados (pintura, estuco...) el soporte no cambia el trabajo; ahí
+    # solo cuentan demolición, reparación y provisional.
+    estructural = clave_objeto(original) in {"muro", "barda", "columna", "castillo", "cerramiento", "dala",
+                                              "cadena", "losa", "firme", "trabe", "zapata", "pretil"}
+    if not estructural:
+        generales = {"demolición / retiro", "reparación", "provisional"}
+        fc = {**fc, "funcion": fc["funcion"] & generales}
+        fr = {**fr, "funcion": fr["funcion"] & generales}
+    diferencia_funcion = fc["funcion"] ^ fr["funcion"]
+    if diferencia_funcion:
+        lado = "la referencia" if diferencia_funcion & fr["funcion"] else "la partida"
+        return f"función distinta: {lado} es {', '.join(sorted(diferencia_funcion))}"
+    if fc["material"] and fr["material"] and not (fc["material"] & fr["material"]) \
+            and not ({"concreto armado"} & fc["material"] and {"concreto armado"} & fr["material"]):
+        return (f"material distinto: la partida es {', '.join(sorted(fc['material']))} y la referencia "
+                f"{', '.join(sorted(fr['material']))}")
     e_cot, e_ref = elemento_principal(original), elemento_principal(candidato)
     if e_cot and e_ref and e_cot != e_ref and {e_cot, e_ref} != {"castillo", "columna"}:
         return f"elemento distinto: la partida es {e_cot} y la referencia es {e_ref}"
@@ -635,6 +685,8 @@ def falta_confirmar(ev: dict, concepto: str) -> str:
     motivo = str(ev.get("motivo") or "")
     if ev.get("estado") == POR_CONFIRMAR:
         partes.append("que sea el mismo concepto (revisión con IA)")
+    if clave_objeto(concepto) == "cerramiento" and re.match(r"\W*(dala|cadena)", _cabeza(ev.get("descripcion"), 2)):
+        partes.append("que la dala/cadena de la referencia sea de cerramiento (superior) y no de desplante")
     if ev.get("fuente") == "ia":
         partes.append("alcance y fecha del precio de la página")
     elif "meses" in motivo or "fecha del precio no disponible" in motivo:

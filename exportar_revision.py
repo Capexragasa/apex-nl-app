@@ -49,6 +49,12 @@ ESTADO_COLOR = {
 }
 
 
+def pd_median(valores):
+    v = sorted(float(x) for x in valores)
+    n = len(v)
+    return (v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2) if n else 0.0
+
+
 def _num(valor):
     try:
         if valor is None or valor == "":
@@ -478,6 +484,21 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # ==================================================================
     # Hoja 3: Por fuente (semáforo por fuente calculado con fórmula)
     # ==================================================================
+    # Plan de la hoja 'Inflación NL' (se escribe más abajo): renglones ordenados
+    # por partida y contrato, para que el P.U. NL de 'Por fuente' sea una
+    # fórmula = mediana de las medianas por contrato de esa hoja.
+    plan_infl = []          # (partida_idx, f, r, contrato)
+    for i_f, f in enumerate(filas):
+        regs_f = (f.get("_evaluaciones") or {}).get("nl", {}).get("registros_todos") or []
+        regs_f = sorted(regs_f, key=lambda r: (str(r.get("ocid") or r.get("licitacion")), r.get("fecha") or ""))
+        for r in regs_f:
+            plan_infl.append((i_f, f, r, str(r.get("ocid") or r.get("licitacion"))))
+    celda_pu_nl = {}        # partida_idx -> celda con la mediana de medianas
+    fila_ini = 5            # primera fila de datos (Excel, 1-based)
+    for k, (i_f, f, r, contrato) in enumerate(plan_infl):
+        if i_f not in celda_pu_nl:
+            celda_pu_nl[i_f] = f"'Inflación NL'!T{fila_ini + k}"
+
     wf = wb.add_worksheet("Por fuente")
     cab_f = ["#", "Concepto", "Unidad", "P.U. cotizado"]
     for clave in FUENTES:
@@ -508,7 +529,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             ref = _num(ev.get("precio_referencia"))
             estado = ev.get("estado", v.SIN_DATO)
             cr, ce = xl_col_to_name(c0), xl_col_to_name(c0 + 1)
-            if ref is not None:
+            if ref is not None and clave == "nl" and i in celda_pu_nl:
+                # Vinculado a la mediana de medianas por contrato ('Inflación NL').
+                wf.write_formula(r, c0, f"=ROUND({celda_pu_nl[i]},2)", f_mon, ref)
+            elif ref is not None:
                 wf.write_number(r, c0, ref, f_input_mon)
             else:
                 wf.write_blank(r, c0, None, f_input_mon)
@@ -592,41 +616,59 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # ==================================================================
     # Hoja: Inflación NL (todos los renglones usados, reproducible)
     # ==================================================================
-    regs = [(f, r) for f in filas for r in ((f.get("_evaluaciones") or {}).get("nl", {}).get("registros_todos") or [])]
-    if regs:
+    if plan_infl:
         wi = wb.add_worksheet("Inflación NL")
         cab_i = ["#", "Concepto cotizado", "Fila en 'Precios Contratados (real)'", "OCID", "Licitación",
                  "Dependencia", "Tipo", "Concepto del contrato", "Fecha", "Precio original", "Mes del índice",
                  "INPC base", "Cómo se obtuvo el INPC base", "Mes final", "INPC final", "Factor (final ÷ base)",
-                 "Precio actualizado", "Contrato (para la mediana)"]
+                 "Precio actualizado", "Contrato (OCID)", "Mediana del contrato", "P.U. NL de la partida"]
         wi.merge_range(0, 0, 0, len(cab_i) - 1, "Actualización por inflación de cada renglón de Nuevo León", f_titulo)
         wi.set_row(0, 26)
-        wi.write(1, 0, "Cada renglón se actualiza con el INPC de su mes (INEGI). La referencia NL es la mediana por "
-                       "contrato (OCID) y después la mediana entre contratos: varios renglones de un mismo contrato "
-                       "cuentan como una sola observación porque la base no trae el número de partida. El ajuste "
-                       "no confirma vigencia comercial ni equivalencia técnica.", f_sub)
+        wi.write(1, 0, "Método: (1) solo renglones técnicamente equivalentes a la partida (misma unidad, mismo objeto, "
+                       "función, material y especificaciones compatibles); (2) cada renglón se actualiza con el INPC de "
+                       "su mes; (3) mediana de los renglones de cada contrato (OCID), porque la base no trae el número "
+                       "de partida; (4) P.U. NL = mediana de las medianas por contrato: cada contrato pesa lo mismo. "
+                       "Las columnas P a T son fórmulas: si cambias un precio o un índice, el P.U. de 'Por fuente' y "
+                       "del Resumen se recalcula.", f_sub)
+        wi.set_row(1, 45)
         for c, t in enumerate(cab_i):
             wi.write(3, c, t, f_cab)
         wi.set_row(3, 30)
         f_ind = fmt(num_format="0.000")
         f_fac = fmt(num_format="0.000000")
-        for k, (f, r) in enumerate(regs):
-            fila = 4 + k
+        # bloques: partida -> lista de (fila_excel, contrato)
+        bloques = {}
+        for k, (i_f, f, r, contrato) in enumerate(plan_infl):
+            bloques.setdefault(i_f, []).append((fila_ini + k, contrato))
+        for k, (i_f, f, r, contrato) in enumerate(plan_infl):
+            fila = fila_ini - 1 + k
             R = fila + 1
             valores = [f.get("Partida"), f.get("Concepto"), r.get("fila_hoja"), r.get("ocid"), r.get("licitacion"),
                        r.get("dependencia"), r.get("tipo"), r.get("concepto"), r.get("fecha")]
             for c, val in enumerate(valores):
                 wi.write(fila, c, "" if val is None else val, f_txt if c in (1, 5, 7) else f_centro)
-            wi.write_number(fila, 9, r["precio_original"], f_mon)
+            wi.write_number(fila, 9, r["precio_original"], f_input_mon)
             wi.write(fila, 10, r.get("indice_mes"), f_centro)
             wi.write_number(fila, 11, r["indice_base"], f_ind)
             wi.write(fila, 12, r.get("metodo_indice"), f_txt)
             wi.write(fila, 13, r.get("indice_final_mes"), f_centro)
             wi.write_number(fila, 14, r["indice_final"], f_ind)
             wi.write_formula(fila, 15, f"=O{R}/L{R}", f_fac, r["factor"])
-            wi.write_formula(fila, 16, f"=ROUND(J{R}*P{R},2)", f_mon, r["precio_actualizado"])
-            wi.write(fila, 17, r.get("ocid") or r.get("licitacion"), f_centro)
-        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30]):
+            wi.write_formula(fila, 16, f"=J{R}*P{R}", f_mon, r["precio_actualizado"])
+            wi.write(fila, 17, contrato, f_centro)
+            # Mediana del contrato: solo en el primer renglón de cada contrato.
+            filas_contrato = [fx for fx, cx in bloques[i_f] if cx == contrato]
+            if R == filas_contrato[0]:
+                vals = [rr["precio_actualizado"] for (ii, ff, rr, cc) in plan_infl if ii == i_f and cc == contrato]
+                wi.write_formula(fila, 18, f"=MEDIAN(Q{filas_contrato[0]}:Q{filas_contrato[-1]})", f_mon,
+                                 float(pd_median(vals)))
+            # P.U. NL de la partida: mediana de las medianas por contrato.
+            filas_partida = [fx for fx, _ in bloques[i_f]]
+            if R == filas_partida[0]:
+                ev_nl = (f.get("_evaluaciones") or {}).get("nl", {})
+                wi.write_formula(fila, 19, f"=MEDIAN(S{filas_partida[0]}:S{filas_partida[-1]})", f_ref.get(
+                    "O_" + (ev_nl.get("clasificacion") or ""), f_mon), ev_nl.get("precio_referencia") or 0)
+        for c, ancho in enumerate([5, 34, 12, 30, 22, 30, 18, 50, 11, 13, 14, 10, 34, 12, 10, 12, 13, 30, 14, 14]):
             wi.set_column(c, c, ancho)
         wi.freeze_panes(4, 2)
         wi.hide_gridlines(2)
@@ -662,7 +704,11 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen caro, en precio (±5 %) o barato; gana la mayoría y, "
                                        "si empatan, 'No coinciden' con el conteo de cada dictamen. No promedia precios. 'Respaldo' dice si "
                                        "hay al menos una referencia validada."),
-        ("Nuevo León", "Mediana del tabulador homologado de licitaciones de NL, actualizada a hoy con INPC (INEGI)."),
+        ("Nuevo León", "Mediana de las medianas por contrato (OCID): cada contrato pesa lo mismo. Dentro de cada "
+                       "contrato solo se agrupan renglones técnicamente equivalentes a la partida (mismo objeto, "
+                       "función, material, unidad y especificaciones compatibles). Cada renglón se actualiza con el "
+                       "INPC de su mes. Detalle y fórmulas en 'Inflación NL'; el P.U. de 'Por fuente' y del Resumen "
+                       "está vinculado a esa hoja."),
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),
         ("Histórico Ragasa", "Cotizaciones guardadas previamente en el histórico interno (Google Sheets)."),
     ]
