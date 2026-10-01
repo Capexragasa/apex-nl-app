@@ -245,7 +245,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                  f'IF(AND(({nc})>({ne}),({nc})>({nb})),"Caro en "&({nc}){sufijo},'
                  f'IF(AND(({ne})>({nc}),({ne})>({nb})),"En precio en "&({ne}){sufijo},'
                  f'IF(AND(({nb})>({nc}),({nb})>({ne})),"Barato en "&({nb}){sufijo},'
-                 f'"Los filtros no coinciden"))))')
+                 f'"No coinciden: "&MID(IF(({nc})>0,", "&({nc})&" caro","")&IF(({ne})>0,", "&({ne})&" en precio","")'
+                 f'&IF(({nb})>0,", "&({nb})&" barato",""),3,100)))))')
         rf = v.resultado_filtros(evs)
         texto_rf = rf["texto"].split(" ", 1)[1] if rf["clave"] else "Sin datos"
         ws.write_formula(r, c_fin, f_res, f_semaforo.get(rf["clave"] or "OTRO", f_semaforo["OTRO"]), texto_rf)
@@ -614,7 +615,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
                           "Histórico Ragasa > Nuevo León > CDMX > IA internet."),
         ("Resultado de los 4 filtros", "Cuenta cuántos filtros dicen caro, en precio (±5 %) o barato; gana la mayoría y, "
-                                       "si empatan, 'Los filtros no coinciden'. No promedia precios. 'Respaldo' dice si "
+                                       "si empatan, 'No coinciden' con el conteo de cada dictamen. No promedia precios. 'Respaldo' dice si "
                                        "hay al menos una referencia validada."),
         ("Nuevo León", "Mediana del tabulador homologado de licitaciones de NL, actualizada a hoy con INPC (INEGI)."),
         ("CDMX", "Tabulador General de Precios Unitarios del Gobierno de la CDMX."),

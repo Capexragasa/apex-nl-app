@@ -525,7 +525,9 @@ def resultado_filtros(evaluaciones: dict) -> dict:
     ganadores = [c for c, k in conteo.items() if k == mayor]
     etiqueta = {ALTO: "🔴 Caro", EN_MERCADO: "🟡 En precio", BAJO: "🟢 Barato"}
     if len(ganadores) > 1:
-        clave, texto = "MIXTO", "🟠 Los filtros no coinciden"
+        partes = [f"{conteo[c]} {palabra}" for c, palabra in
+                  ((ALTO, "caro"), (EN_MERCADO, "en precio"), (BAJO, "barato")) if conteo[c]]
+        clave, texto = "MIXTO", "🟠 No coinciden: " + ", ".join(partes)
     else:
         clave = ganadores[0]
         texto = f"{etiqueta[clave]} en {mayor} de {n} filtro{'s' if n > 1 else ''}"

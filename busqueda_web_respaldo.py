@@ -65,6 +65,9 @@ _PRECIO = re.compile(
 # En tablas de tabuladores el precio va sin "$", justo después de la unidad:
 # "M2 219.12". Solo se acepta con dos decimales.
 _PRECIO_TABLA = re.compile(r"\b(m2|m3|ml|m|pza|pieza|kg)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\b", re.I)
+_MONEDA_EXTRANJERA = re.compile(
+    r"(₹|€|£|us\$|\busd\b|dolar|dollar|\beuros?\b|\bindia\b|\bcop\b|\bsoles\b|\bpies\b|\bfeet\b|sq ?ft)"
+)
 _ANIO = re.compile(r"\b(202[3-7])\b")
 
 
@@ -216,15 +219,41 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
         # anteriores, sin cruzar a otro renglón con precio.
         palabras = re.findall(r"[a-záéíóúñ]{4,}", linea.lower())
         contexto = linea
-        if len(palabras) < 2:
+        plano_linea = _plano(linea)
+        # Renglones de desglose de un APU: no son el precio del concepto.
+        if re.match(r"\W*(materiales|mano de obra|equipo|herramienta|subtotal|utilidad|indirecto|"
+                    r"financiamiento|cargos? adicional|costo directo|sub-?total|iva|total)\b", plano_linea):
+            continue
+        if re.search(r"precio unitario|p\.u\.|importe unitario", plano_linea) and len(palabras) < 8:
+            # Análisis de precio unitario (APU) en PDF de licitación: el
+            # concepto y la unidad están arriba, en "Descripción ... Unidad: ML".
+            inicio = None
+            for j in range(i - 1, max(-1, i - 30), -1):
+                pj = _plano(lineas[j])
+                if re.search(r"precio unitario", pj):
+                    break
+                if re.search(r"^\W*(descripcion|concepto)\b", pj):
+                    inicio = j
+                    break
+            if inicio is not None:
+                desc = [lineas[inicio]] + [l for l in lineas[inicio + 1:inicio + 4] if not _precios_en(l)]
+                cercanas = lineas[max(0, inicio - 3):i]
+                unidad_l = next((l for l in cercanas if re.search(r"\bunidad\s*:", _plano(l))), "")
+                contexto = " ".join(desc + [unidad_l, linea])
+        elif len(palabras) < 2:
             previos = []
             for j in range(i - 1, max(-1, i - 3), -1):
                 if _precios_en(lineas[j]):
                     break
                 previos.insert(0, lineas[j])
             contexto = " ".join(previos + [linea])
-        contexto = contexto[-600:]
+        # Párrafos largos (blogs, calculadoras) mezclan varias cifras: no son
+        # un renglón de catálogo.
+        if len(contexto) > 500:
+            continue
         ctx = re.sub(r"(\d)\s*x\s*(?=\d)", r"\1 x ", _plano(contexto))
+        if _MONEDA_EXTRANJERA.search(ctx):
+            continue
         if not patron_u.search(ctx):
             continue
         if elemento and elemento_principal(contexto) != elemento and not (
