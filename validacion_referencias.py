@@ -269,7 +269,33 @@ def extraer_especificaciones(texto: str) -> dict:
     cal = re.findall(r"\bCAL(?:IBRE)?\.?\s*(\d{1,2})\b", t)
     if cal:
         specs["calibre"] = set(cal)
+    # Capacidad / potencia de equipos: dos bombas o dos grúas no se comparan
+    # si no tienen la misma capacidad.
+    cap = re.findall(r"(\d+(?:[.,]\d+)?)\s*(HP|H\.P\.|KW|KVA|WATTS?|W|TON|TONS|TONELADAS|BTU|LTS?|LITROS|"
+                     r"GPM|LPS|M3/H|AMPERES|AMP|V|VOLTS?|KG/CM2)\b", t)
+    # f'c va aparte; "V" solo como voltaje real (110/127/220/440).
+    cap = [(v, u) for v, u in cap
+           if u != "KG/CM2" and not (u == "V" and float(v.replace(",", ".")) < 100)]
+    if cap:
+        norm = {"H.P.": "HP", "TONS": "TON", "TONELADAS": "TON", "LT": "L", "LTS": "L", "LITROS": "L",
+                "WATT": "W", "WATTS": "W", "AMPERES": "A", "AMP": "A", "VOLT": "V", "VOLTS": "V"}
+        specs["capacidad"] = {f"{float(v.replace(',', '.')):g} {norm.get(u, u)}" for v, u in cap}
+    dia = re.findall(r"(\d+(?:\s\d+)?/\d+|\d+(?:\.\d+)?)\s*(\"|”|''|PULG|PULGADAS)", t)
+    dia += [(v, "MM") for v in re.findall(r"(\d+(?:\.\d+)?)\s*MM\.?\s*(?:DE\s+)?DIAMETRO", t)]
+    if dia:
+        specs["diámetro"] = {(v + " PULG") if u != "MM" else (v + " MM") for v, u in dia}
     return specs
+
+
+# Especificaciones que definen el TAMAÑO de una pieza o equipo.
+SPECS_TAMANO = ("sección / medidas", "capacidad", "diámetro")
+
+
+def _dims_compatibles(a: str, b: str) -> bool:
+    """'15X20' y '15X20X40' son compatibles (texto truncado); '10X20' no."""
+    x, y = a.split("X"), b.split("X")
+    corto, largo = (x, y) if len(x) <= len(y) else (y, x)
+    return largo[:len(corto)] == corto
 
 
 # Inclusiones que cambian el precio: si la referencia las trae y el
@@ -301,6 +327,8 @@ def comparar_especificaciones(cotizado: str, referencia: str):
             continue  # "block 15x20x40" ya declara 15 cm de espesor
         if campo not in cot:
             faltantes.append(f"{campo} {', '.join(sorted(valores))}")
+        elif campo == "sección / medidas" and any(_dims_compatibles(a, b) for a in valores for b in cot[campo]):
+            continue
         elif not (valores & cot[campo]):
             conflictos.append(f"{campo}: cotizado {', '.join(sorted(cot[campo]))} vs referencia {', '.join(sorted(valores))}")
     return faltantes, conflictos
@@ -404,14 +432,27 @@ def evaluar_fuente(
 
     # Precio por pieza: dos piezas solo se comparan si se sabe su tamaño. Si
     # la referencia trae medidas y la partida no, o difieren, no se compara.
+    # Piezas, equipos, juegos, lotes y servicios: dos "bombas" o dos "piezas"
+    # pueden ser muy distintas. Si la referencia define tamaño o capacidad y
+    # la cotización no lo declara, no se compara.
     u = _plano(unidad or "").replace(".", "").strip()
-    if u in ("pza", "pz", "pzas", "pieza", "piezas", "un", "unidad", "jgo", "lote"):
-        med_ref = extraer_especificaciones(fuente.get("match")).get("sección / medidas")
-        med_cot = extraer_especificaciones(concepto).get("sección / medidas")
-        if med_ref and not med_cot:
+    if u in ("pza", "pz", "pzas", "pieza", "piezas", "un", "unidad", "jgo", "juego", "lote", "servicio",
+             "serv", "jornal", "equipo", "kit", "sal", "salida"):
+        spec_ref = extraer_especificaciones(fuente.get("match"))
+        spec_cot = extraer_especificaciones(concepto)
+        faltan = [f"{c} {', '.join(sorted(spec_ref[c]))}" for c in SPECS_TAMANO
+                  if spec_ref.get(c) and not spec_cot.get(c)]
+        sin_dato_ref = [f"{c} {', '.join(sorted(spec_cot[c]))}" for c in SPECS_TAMANO
+                        if spec_cot.get(c) and not spec_ref.get(c)]
+        if sin_dato_ref:
             salida.update(estado=NO_COMPARABLE, clasificacion=None, diferencia_pct=None, diferencia_unitaria=None,
-                          motivo=f"precio por pieza: la referencia es de {', '.join(sorted(med_ref))} y la "
-                                 "cotización no declara medidas; pedir dimensiones antes de comparar")
+                          motivo=f"precio por {u}: la cotización es de {'; '.join(sin_dato_ref)} y la referencia "
+                                 "no indica ese tamaño/capacidad; no se puede comparar")
+            return salida
+        if faltan:
+            salida.update(estado=NO_COMPARABLE, clasificacion=None, diferencia_pct=None, diferencia_unitaria=None,
+                          motivo=f"precio por {u}: la referencia es de {'; '.join(faltan)} y la cotización no "
+                                 "lo declara; pedir dimensiones/capacidad antes de comparar")
             return salida
 
     # Regla 2: NO_SEGURO se conserva como orientativa.

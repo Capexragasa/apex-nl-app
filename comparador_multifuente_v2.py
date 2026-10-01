@@ -869,10 +869,14 @@ class ComparadorMultiFuente:
         self.competidores = None
 
     def registros_nl(self, row) -> pd.DataFrame:
-        """Renglones crudos (contratos adjudicados) que forman el concepto
-        homologado `row`: misma unidad, fechas dentro del periodo del grupo y
-        texto equivalente (mismo umbral del homologador, 82)."""
+        """Contratos (renglones crudos de NL) EQUIVALENTES al concepto `row`:
+        misma unidad, texto casi idéntico (≥ 90), sin especificaciones en
+        conflicto (p. ej. block 10x20 contra 15x20) y sin cifras atípicas
+        (más de 5× o menos de 1/5 de la mediana del grupo). Con ellos se
+        actualiza CADA precio con el INPC de su mes y luego se calcula la
+        mediana."""
         try:
+            from validacion_referencias import alcance_distinto, comparar_especificaciones
             if self._nl_crudo is None:
                 crudo = pd.read_excel(self._excel_path, sheet_name='Precios Contratados (real)')
                 crudo['unidad_norm'] = crudo['unidad'].map(normalize_unit)
@@ -883,25 +887,29 @@ class ComparadorMultiFuente:
                 pool['concepto_norm'] = pool['concepto'].map(normalize_text)
                 self._nl_crudo_pools[u] = pool
             pool = self._nl_crudo_pools[u]
-            fmin, fmax = str(row['fecha_min'])[:10], str(row['fecha_max'])[:10]
-            pool = pool[(pool['fecha'].astype(str).str[:10] >= fmin) & (pool['fecha'].astype(str).str[:10] <= fmax)]
             if pool.empty:
                 return pool
-            n = int(row.get('n_registros') or 1)
             elegidos = process.extract(row['concepto_norm'], pool['concepto_norm'].tolist(),
-                                       scorer=fuzz.token_set_ratio, score_cutoff=82, limit=max(n * 2, 5))
-            idx = [i for _, _, i in elegidos][:n]
-            elegidos_df = pool.iloc[idx]
-            # Control: los renglones deben reproducir el grupo homologado
-            # (mismo número y misma mediana original, ±2 %). Si no, no se usan
-            # y el ajuste vuelve al método aproximado (se indica así).
-            if elegidos_df.empty or len(elegidos_df) != n:
-                return pool.iloc[0:0]
-            med = float(elegidos_df['precio_unitario'].median())
-            ref = float(row['precio_mediana'] or 0)
-            if ref and abs(med - ref) / ref > 0.02:
-                return pool.iloc[0:0]
-            return elegidos_df
+                                       scorer=fuzz.token_set_ratio, score_cutoff=90, limit=None)
+            idx = [i for _, _, i in elegidos]
+            # Miembros seguros del grupo homologado: renglones cuyo precio ES
+            # uno de sus estadísticos (mín, p25, mediana, p75, máx), dentro de
+            # su periodo y con texto muy parecido (≥ 85).
+            stats = [float(row[c]) for c in ('precio_min', 'precio_p25', 'precio_mediana', 'precio_p75', 'precio_max')
+                     if c in row and pd.notna(row[c])]
+            f = pool['fecha'].astype(str).str[:10]
+            dentro = pool[(f >= str(row['fecha_min'])[:10]) & (f <= str(row['fecha_max'])[:10])]
+            for i_pos, (pr, txt) in enumerate(zip(dentro['precio_unitario'], dentro['concepto_norm'])):
+                if any(abs(float(pr) - st) < 0.005 for st in stats) and \
+                        fuzz.token_set_ratio(row['concepto_norm'], txt) >= 85:
+                    idx.append(pool.index.get_loc(dentro.index[i_pos]))
+            grupo = pool.iloc[sorted(set(idx))]
+            grupo = grupo[[not comparar_especificaciones(row['concepto_norm'], x)[1]
+                           and not alcance_distinto(row['concepto_norm'], x) for x in grupo['concepto_norm']]]
+            med = float(row['precio_mediana'] or 0)
+            if med:
+                grupo = grupo[(grupo['precio_unitario'] <= med * 5) & (grupo['precio_unitario'] >= med / 5)]
+            return grupo
         except Exception:
             return pd.DataFrame()
 
@@ -980,8 +988,10 @@ class ComparadorMultiFuente:
             mediana_uso = round(float(serie.median()), 2)
             p25_uso = round(float(serie.quantile(0.25)), 2)
             p75_uso = round(float(serie.quantile(0.75)), 2)
-            factor = mediana_uso / float(row['precio_mediana']) if row['precio_mediana'] else factor
-            metodo_inflacion = f'cada uno de los {len(crudos)} renglones con el INPC de su mes'
+            _med_orig = float(crudos['precio_unitario'].median())
+            factor = mediana_uso / _med_orig if _med_orig else factor
+            metodo_inflacion = (f'cada uno de los {len(crudos)} contratos equivalentes con el INPC de su mes; '
+                                'después la mediana')
         if ajustar_inflacion and crudos.empty:
             # Sin los renglones del grupo: se localiza el renglón cuyo precio
             # ES cada estadístico (mediana, p25, p75) y se usa SU mes.
@@ -1016,7 +1026,7 @@ class ComparadorMultiFuente:
                             'licitacion': r_.get('licitacion_id'), 'ocid': r_.get('ocid'),
                             'dependencia': r_.get('dependencia'), 'proyecto': r_.get('proyecto'),
                             'tipo': r_.get('fuente')})
-        for _, c in crudos.head(5).iterrows():
+        for _, c in (crudos.sort_values('fecha', ascending=False).head(5) if not crudos.empty else crudos).iterrows():
             detalle_registros.append({
                 'fecha': str(c['fecha'])[:10], 'precio': float(c['precio_unitario']),
                 'licitacion': c.get('licitacion_id'), 'ocid': c.get('ocid'),
@@ -1029,11 +1039,18 @@ class ComparadorMultiFuente:
             factor = 1.0
             p25_uso, p75_uso, mediana_uso = float(row['precio_p25']), float(row['precio_p75']), float(row['precio_mediana'])
             metodo_inflacion = 'sin ajuste por inflación'
+        grupo_ok = (not crudos.empty) and ajustar_inflacion
         return {
+            'mediana_original': (round(float(crudos['precio_unitario'].median()), 2) if grupo_ok
+                                 else float(row['precio_mediana'])),
+            'n': int(len(crudos)) if grupo_ok else int(row['n_registros']),
+            'fecha_min': (str(crudos['fecha'].astype(str).min())[:10] if grupo_ok else str(row['fecha_min'])[:10]),
+            'fecha_max': (str(crudos['fecha'].astype(str).max())[:10] if grupo_ok else str(row['fecha_max'])[:10]),
             'mediana': round(float(mediana_uso), 2), 'p25': round(float(p25_uso), 2), 'p75': round(float(p75_uso), 2),
             'factor': factor, 'periodo_base': periodo_base, 'metodo': metodo_inflacion,
             'registros_usados': int(len(crudos)), 'registros_detalle': detalle_registros,
-            'tipos': ', '.join(sorted(tipos)), 'anio_dato': anio_dato,
+            'tipos': ', '.join(sorted(tipos)),
+            'anio_dato': (str(crudos['fecha'].astype(str).max())[:4] if grupo_ok else anio_dato),
         }
 
     def cargar_ragasa(self, df_o_ruta):
@@ -1217,8 +1234,8 @@ class ComparadorMultiFuente:
                 'precio': round(float(med), 2),
                 'rango_bajo': round(float(p25), 2),
                 'rango_alto': round(float(p75), 2),
-                'n_registros': int(row['n_registros']),
-                'fecha': f"{str(row['fecha_min'])[:7]} a {str(row['fecha_max'])[:7]}",
+                'n_registros': aj_nl['n'],
+                'fecha': f"{aj_nl['fecha_min'][:7]} a {aj_nl['fecha_max'][:7]}",
                 'nota': 'mediana y rango p25-p75 de licitaciones SIASI (OCDS), ajustados por INPC'
                         if ajustar_inflacion else 'mediana y rango p25-p75 de licitaciones SIASI (OCDS)',
                 'score': round(score, 1),
@@ -1280,11 +1297,11 @@ class ComparadorMultiFuente:
             veredicto = clasificar(precio_cotizado, banda_baja, banda_alta)
             resultado['fuentes']['nl_historico'] = {
                 'match': row['concepto_homologado'], 'score': round(score, 1), 'unidad': row['unidad'],
-                'fecha_min': str(row['fecha_min'])[:10], 'fecha_max': str(row['fecha_max'])[:10],
+                'fecha_min': aj_nl['fecha_min'], 'fecha_max': aj_nl['fecha_max'],
                 'confianza': confianza,
                 'precio_min': float(row['precio_min']), 'precio_p25': float(row['precio_p25']),
-                'precio_mediana': float(row['precio_mediana']), 'precio_p75': float(row['precio_p75']),
-                'precio_max': float(row['precio_max']), 'n_registros': int(row['n_registros']),
+                'precio_mediana': aj_nl['mediana_original'], 'precio_p75': float(row['precio_p75']),
+                'precio_max': float(row['precio_max']), 'n_registros': aj_nl['n'],
                 'variabilidad': row['variabilidad'],
                 'anio_dato_mas_reciente': anio_dato,
                 'periodo_base_inflacion': periodo_base,

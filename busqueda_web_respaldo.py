@@ -303,7 +303,7 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
     """Referencias (concepto, unidad, precio) encontradas en el texto."""
     from rapidfuzz import fuzz
     from validacion_referencias import (alcance_distinto, comparar_especificaciones, elemento_principal,
-                                        extraer_especificaciones, trabajo_principal)
+                                        extraer_especificaciones, trabajo_principal, SPECS_TAMANO)
 
     if not texto:
         return []
@@ -351,9 +351,12 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
         # pieza de un tamaño que la partida no declara: se busca otra fuente.
         if comparar_especificaciones(descripcion, contexto)[1]:
             continue
-        if u == "PZA" and extraer_especificaciones(contexto).get("sección / medidas") and not \
-                extraer_especificaciones(descripcion).get("sección / medidas"):
-            continue
+        if u in ("PZA", "JGO", "LOTE", "SERVICIO", "JORNAL", "KIT", "SALIDA"):
+            # Dos piezas/equipos solo se comparan con el mismo tamaño o
+            # capacidad declarados en ambos lados.
+            sr, sc = extraer_especificaciones(contexto), extraer_especificaciones(descripcion)
+            if any(bool(sr.get(c)) != bool(sc.get(c)) for c in SPECS_TAMANO):
+                continue
         similitud = max((fuzz.token_set_ratio(c, ctx) for c in consultas), default=0)
         if similitud < UMBRAL_TEXTO:
             continue

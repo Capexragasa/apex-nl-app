@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from validacion_referencias import FACTOR_ESCALA, alcance_distinto, extraer_especificaciones
+from validacion_referencias import FACTOR_ESCALA, SPECS_TAMANO, alcance_distinto, extraer_especificaciones
 
 MATERIALES_CLAVE = (
     "ESTUCO", "YESO", "MORTERO", "BLOCK", "TABIQUE", "LADRILLO", "TABICON",
@@ -127,9 +127,10 @@ def datos_mercado(comparador, partidas: list[dict], altura_muro=None, k: int = 3
         ]
         # Por pieza: una referencia con medidas no se compara contra una
         # partida que no declara medidas (solo queda como escenario).
-        if es_pieza and not extraer_especificaciones(concepto).get("sección / medidas"):
-            filas = [r for r in filas if r["relacion"] == "escenario por pieza"
-                     or not extraer_especificaciones(r["concepto"]).get("sección / medidas")]
+        if es_pieza:
+            sc = extraer_especificaciones(concepto)
+            filas = [r for r in filas if r["relacion"] == "escenario por pieza" or not any(
+                bool(extraer_especificaciones(r["concepto"]).get(c)) != bool(sc.get(c)) for c in SPECS_TAMANO)]
         for ref in filas:
             ref["partida"] = p.get("partida")
             ref["concepto_cotizado"] = concepto

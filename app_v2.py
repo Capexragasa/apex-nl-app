@@ -164,13 +164,14 @@ def _inflacion_nl(nl: dict) -> dict:
         ajustada = nl.get("precio_mediana_ajustada") or 0
         return {
             "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
-            "periodo_base": f"mes de cada renglón ({str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]})",
+            "periodo_base": f"mes de cada contrato ({str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]})",
             "valor_base": None,
             "periodo_final": ajuste_inflacion.ETIQUETA_ACTUAL,
             "valor_final": ajuste_inflacion.NIVEL_ACTUAL,
             "factor": round(ajustada / original, 4) if original else None,
             "justificacion": (
-                f"Cada uno de los {usados} renglones se actualizó con el INPC de su propio mes "
+                f"Cada uno de los {usados} contratos equivalentes (misma unidad, texto casi idéntico, sin "
+                "especificaciones en conflicto y sin cifras atípicas) se actualizó con el INPC de su propio mes "
                 + f"({fuente_indice})"
                 + " y después se calculó la mediana; el factor mostrado es el efectivo (mediana actualizada ÷ "
                   "mediana original)."
