@@ -2002,12 +2002,12 @@ with st.sidebar:
 
     proveedor = st.text_input(
         "Proveedor",
-        placeholder="Nombre del proveedor",
+        placeholder="Opcional",
     )
 
     proyecto = st.text_input(
         "Proyecto / licitación",
-        placeholder="Ej. Planta Norte 2026",
+        placeholder="Opcional",
     )
 
     guardar_en_historico = st.checkbox(
@@ -2300,7 +2300,8 @@ if archivo is not None:
                             unidad,
                             precio,
                             usar_ia=usar_ia,
-                            excluir=(proveedor, proyecto),
+                            excluir=((proveedor or "").strip() or "Sin proveedor",
+                                     (proyecto or "").strip() or Path(archivo.name).stem),
                         )
 
                     fila_registros.append(
@@ -3098,31 +3099,20 @@ if archivo is not None:
                     and guardar_en_historico
                 ):
 
-                    if (
-                        not proveedor
-                        or not proyecto
-                    ):
-
-                        st.warning(
-                            "Escribe el proveedor y el proyecto "
-                            "en la barra lateral para guardar "
-                            "la cotización en el histórico."
-                        )
-
-                    else:
-
-                        historico.ingerir(
-                            cotizacion_historico,
-                            proveedor=proveedor,
-                            proyecto=proyecto,
-                        )
-
-                        st.success(
-                            "Cotización guardada en el "
-                            "histórico interno. "
-                            f"{len(cotizacion_historico)} "
-                            "partidas agregadas."
-                        )
+                    # Cotización única: proveedor y proyecto son opcionales. Si
+                    # faltan, se guarda como "Sin proveedor" y el nombre del
+                    # archivo, para poder identificarla y no duplicarla.
+                    _prov_h = (proveedor or "").strip() or "Sin proveedor"
+                    _proy_h = (proyecto or "").strip() or Path(archivo.name).stem
+                    _nuevas = historico.ingerir(
+                        cotizacion_historico,
+                        proveedor=_prov_h,
+                        proyecto=_proy_h,
+                    )
+                    st.success(
+                        f"Cotización guardada en el histórico (sin IVA): {len(_nuevas)} partida(s) nuevas"
+                        + (" · las demás ya estaban guardadas." if len(_nuevas) < len(cotizacion_historico) else ".")
+                    )
 
             if tabla.empty:
 
@@ -3300,7 +3290,7 @@ if archivo is not None:
                 st.caption("Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
                            "criterio operativo de la app) · 🟢 barato · gris = no se puede comparar. «Posiblemente» = "
                            "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
-                           "filtros coinciden y cuántos están validados; no promedia precios.")
+                           "filtros coinciden y cuántos están validados; no promedia precios. Todos los precios se comparan sin IVA.")
 
                 # ---------------- 3. Acción principal ----------------
                 def _nombre_corto(concepto):

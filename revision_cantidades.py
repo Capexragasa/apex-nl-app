@@ -212,8 +212,8 @@ def revisar(partidas: list[dict], total_declarado=None, contexto: str = "") -> d
 
     total_para_iva = total_ref or total_calculado
     alcances = [
-        f"IVA: confirmar por escrito si el total incluye IVA. Si ${total_para_iva:,.2f} fuera subtotal, "
-        f"con 16 % el total sería ${total_para_iva * (1 + IVA):,.2f}.",
+        f"Precios sin IVA: la revisión compara P.U. y subtotal sin IVA (${total_para_iva:,.2f}); "
+        f"con 16 % de IVA el total a pagar sería ${total_para_iva * (1 + IVA):,.2f}.",
         "Vigencia de la cotización, condiciones de pago y tiempo de entrega.",
         "Retiro de escombro, limpieza final y curado de concreto.",
     ]

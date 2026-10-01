@@ -296,6 +296,11 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
                 continue
             if not precio_cotizado and not (5 <= precio <= 200_000):
                 continue
+            # Todo se compara SIN IVA: si la página dice que el precio ya
+            # incluye IVA, se divide entre 1.16.
+            con_iva = bool(re.search(r"(iva incluido|incluye iva|con iva|iva inclu|precio final con iva)", ctx))
+            if con_iva:
+                precio = round(precio / 1.16, 2)
             anio = max(_ANIO.findall(contexto), default=None)
             salida.append({
                 "precio": round(precio, 2),
@@ -308,6 +313,7 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
                 "anio": anio,
                 "origen": origen,
                 "region": region,
+                "con_iva": con_iva,
             })
             break
     return salida
@@ -402,7 +408,8 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
         "fragmento": mejor["concepto"],
         "nota": (f"Precio leído en el {mejor['origen']} (concepto, unidad y precio en el mismo renglón); "
                  f"similitud de concepto {mejor['similitud']:.0f}/100. Orientativo: falta confirmar "
-                 "especificación, alcance, fecha e IVA."),
+                 "especificación, alcance y fecha." + (" El precio de la página incluía IVA y se llevó a "
+                                                      "sin IVA (÷ 1.16)." if mejor.get("con_iva") else "")),
         "otras_referencias": [
             {"precio": r["precio"], "fuente": r["titulo"] or r["url"], "url": r["url"],
              "confiabilidad": r["confiabilidad"]} for r in otras

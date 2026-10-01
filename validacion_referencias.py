@@ -532,7 +532,7 @@ def falta_confirmar(ev: dict, concepto: str) -> str:
     if ev.get("estado") == POR_CONFIRMAR:
         partes.append("que sea el mismo concepto (revisión con IA)")
     if ev.get("fuente") == "ia":
-        partes.append("alcance, fecha del precio e IVA de la página")
+        partes.append("alcance y fecha del precio de la página")
     elif "meses" in motivo or "fecha del precio no disponible" in motivo:
         partes.append("vigencia del precio")
     return "; ".join(dict.fromkeys(p for p in partes if p)) or motivo
@@ -552,10 +552,10 @@ def alcance_precio(ev: dict) -> str:
     if inc:
         partes.append("incluye " + inc.group(1).strip())
     base = {
-        "nl": "precio unitario contratado en obra pública (costo directo + indirectos + utilidad); IVA: confirmar",
-        "cdmx": "precio unitario de tabulador oficial (costo directo + indirectos + utilidad); IVA: confirmar",
-        "historico": "precio cotizado a Ragasa (cotización recibida); IVA según la cotización original",
-        "ia": "precio publicado en la página; alcance e IVA no confirmados",
+        "nl": "precio unitario contratado en obra pública (costo directo + indirectos + utilidad), sin IVA",
+        "cdmx": "precio unitario de tabulador oficial (costo directo + indirectos + utilidad), sin IVA",
+        "historico": "precio cotizado a Ragasa (cotización recibida), sin IVA",
+        "ia": "precio publicado en la página, llevado a sin IVA; alcance no confirmado",
     }.get(ev.get("fuente"), "")
     return "; ".join(x for x in [", ".join(partes) if partes else "", base] if x)
 
