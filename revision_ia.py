@@ -208,7 +208,23 @@ def ia_disponible(api_key=None) -> bool:
     return len(_obtener_clientes()) > 0
 
 
+# Cuota DIARIA agotada (no el límite por minuto): reintentar no sirve y
+# cada llamada fallida retrasa la revisión. Se "abre el circuito" 15 min y
+# las demás partidas pasan de inmediato al siguiente proveedor o quedan
+# como pendientes de validar.
+_gemini_pausa = {"hasta": 0.0}
+
+
+def _es_cuota_diaria(error) -> bool:
+    texto = str(error).lower()
+    return _es_error_rate_limit(error) and any(
+        p in texto for p in ("per day", "perday", "daily", "limit: 0", "exceeded your current quota")
+    )
+
+
 def _llamar_gemini(cliente, prompt, modelo, max_tokens):
+    if time.time() < _gemini_pausa["hasta"]:
+        return None
     ultimo_error_local = None
     for intento in range(_REINTENTOS_POR_RATE_LIMIT):
         try:
@@ -223,6 +239,10 @@ def _llamar_gemini(cliente, prompt, modelo, max_tokens):
             return respuesta.text
         except Exception as error:
             ultimo_error_local = error
+            if _es_cuota_diaria(error):
+                _gemini_pausa["hasta"] = time.time() + 15 * 60
+                _registrar_error(error, "gemini")
+                return None
             if _es_error_rate_limit(error) and intento < _REINTENTOS_POR_RATE_LIMIT - 1:
                 time.sleep(_ESPERA_BASE_SEGUNDOS * (intento + 1))
                 continue

@@ -124,6 +124,24 @@ def elemento_principal(texto: str):
     return "castillo" if nombre == "columna" and re.search(_ELEMENTOS[1][1], t) else nombre
 
 
+# Trabajo principal de acabados: un aplanado/estuco no se compara contra una
+# pintura o un impermeabilizante aunque el texto mencione "aplanado".
+_TRABAJOS = (
+    ("aplanado", r"\b(estuco|aplanados?|zarpeo|repellados?|enjarres?|afine)\b"),
+    ("pintura", r"\b(pintura|esmalte|vinilica|sellador)\b"),
+    ("impermeabilizacion", r"\bimpermeabiliza\w*"),
+    ("demolicion", r"\b(demolicion|desmantelamiento|retiro)\b"),
+    ("cimbra", r"\b(cimbra|descimbra)\b"),
+)
+
+
+def trabajo_principal(texto: str):
+    t = _plano(texto)
+    encontrados = [(m.start(), nombre) for nombre, patron in _TRABAJOS
+                   for m in [re.search(patron, t)] if m]
+    return min(encontrados)[1] if encontrados else None
+
+
 def alcance_distinto(cotizado: str, referencia: str):
     """Regresa el motivo si el alcance o material de la referencia no es comparable."""
     original = _plano(cotizado)
@@ -133,6 +151,11 @@ def alcance_distinto(cotizado: str, referencia: str):
     e_cot, e_ref = elemento_principal(original), elemento_principal(candidato)
     if e_cot and e_ref and e_cot != e_ref and {e_cot, e_ref} != {"castillo", "columna"}:
         return f"elemento distinto: la partida es {e_cot} y la referencia es {e_ref}"
+    if e_cot in ("castillo", "cerramiento", "columna") and not e_ref:
+        return f"la referencia no es un {e_cot} (otro elemento)"
+    t_cot, t_ref = trabajo_principal(original), trabajo_principal(candidato)
+    if t_cot and t_ref and t_cot != t_ref:
+        return f"trabajo distinto: la partida es {t_cot} y la referencia es {t_ref}"
     # Material distinto: p. ej. "columnas para amarrar barda" (concreto)
     # contra "bases para columnas metálicas" (acero). No requiere IA.
     if _METAL.search(candidato) and not _METAL.search(original) and _MAMPOSTERIA.search(original):
@@ -421,3 +444,55 @@ def resultado_final(evaluaciones: dict, precio: float, cantidad) -> dict:
             if base else "solo hay referencias sin concepto confirmado; revisar antes de negociar"
         )
     return salida
+
+
+# ----------------------------------------------------------------------
+# Presentación común (pantalla, CSV y Excel): mismo texto en todos lados.
+# ----------------------------------------------------------------------
+_CLAS_TEXTO = {"ALTO": "caro", "EN MERCADO": "en mercado", "BAJO": "barato"}
+
+
+def dictamen_texto(ev: dict) -> str:
+    """'Validado · caro', 'Orientativo · caro', 'Rechazada', 'Sin referencia'."""
+    estado, clas = ev.get("estado"), _CLAS_TEXTO.get(ev.get("clasificacion") or "", "")
+    if estado == VALIDADA:
+        return f"Validado · {clas}" if clas else "Validado"
+    if estado in ORIENTATIVAS:
+        return f"Orientativo · {clas}" if clas else "Orientativo"
+    if estado == RECHAZADA:
+        return "Rechazada"
+    return "Sin referencia"
+
+
+def confiabilidad_texto(ev: dict) -> str:
+    """Confiabilidad del dato. Una referencia no validada nunca sale 'alta'."""
+    if ev.get("estado") in (SIN_DATO, RECHAZADA) or not ev.get("precio_referencia"):
+        return "—"
+    if ev.get("estado") == VALIDADA:
+        return "Alta (validada)"
+    conf = str(ev.get("confianza") or "").upper()
+    if ev.get("fuente") == "ia":
+        return "Media" if conf == "MEDIA" else "Baja"
+    return {"ALTA": "Media", "MEDIA": "Media", "BAJA": "Baja"}.get(conf, "Baja")
+
+
+def falta_confirmar(ev: dict, concepto: str) -> str:
+    """Qué hay que confirmar con el proveedor para validar la referencia."""
+    if ev.get("estado") == VALIDADA:
+        return ""
+    if ev.get("estado") == RECHAZADA:
+        return str(ev.get("motivo") or "")
+    if ev.get("estado") == SIN_DATO or not ev.get("descripcion"):
+        return str(ev.get("motivo") or "sin concepto comparable")
+    faltantes, _ = comparar_especificaciones(concepto, ev.get("descripcion"))
+    partes = list(faltantes)
+    motivo = str(ev.get("motivo") or "")
+    if ev.get("estado") == POR_CONFIRMAR:
+        partes.append("que sea el mismo concepto (revisión con IA)")
+    if "fuera de escala" in motivo:
+        partes.append("unidad/alcance (precio fuera de escala)")
+    if ev.get("fuente") == "ia":
+        partes.append("alcance, fecha del precio e IVA de la página")
+    elif "meses" in motivo or "fecha del precio no disponible" in motivo:
+        partes.append("vigencia del precio")
+    return "; ".join(dict.fromkeys(p for p in partes if p)) or motivo

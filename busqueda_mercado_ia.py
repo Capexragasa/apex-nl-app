@@ -125,9 +125,15 @@ def _tavily_disponible(api_key=None) -> bool:
 
 
 def busqueda_disponible(api_key=None) -> bool:
-    """True si hay AL MENOS un motor de busqueda configurado (Gemini o
-    Tavily como respaldo gratuito)."""
-    return _obtener_cliente(api_key) is not None or _tavily_disponible()
+    """True si hay AL MENOS un motor de búsqueda: Gemini, Tavily o el
+    buscador público de respaldo (paquete ddgs, sin clave)."""
+    if _obtener_cliente(api_key) is not None or _tavily_disponible():
+        return True
+    try:
+        import ddgs  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def _extraer_json(texto):
@@ -299,6 +305,26 @@ def _modelos_disponibles_en_la_clave(cliente, ya_probados):
     return sorted(nombres, key=lambda n: (("preview" in n) or ("exp" in n), -_version(n), "lite" in n))[:5]
 
 
+# Cuando Gemini responde 429 / RESOURCE_EXHAUSTED no se recorre toda la
+# lista de modelos (cada intento tarda y casi siempre falla igual): se
+# prueba a lo más UN modelo "lite" (cuota separada) y se pasa al respaldo
+# web. Durante PAUSA_CUOTA_S segundos ni siquiera se vuelve a intentar.
+PAUSA_CUOTA_S = 15 * 60
+MAX_INTENTOS_GEMINI = 3
+_cuota = {"agotada_hasta": 0.0, "mensaje": None}
+
+
+def _es_error_de_cuota(error):
+    texto = str(error).lower()
+    return any(m in texto for m in ("429", "resource_exhausted", "quota", "rate limit", "exceeded"))
+
+
+def gemini_sin_cuota():
+    """Mensaje si Gemini está en pausa por cuota agotada; None si no."""
+    import time
+    return _cuota["mensaje"] if time.time() < _cuota["agotada_hasta"] else None
+
+
 def _es_error_de_modelo(error):
     """Errores que se resuelven probando OTRO modelo: el modelo no existe
     para esta clave, o se agoto la cuota de ese modelo en particular (cada
@@ -367,9 +393,15 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         '"nota": "<1 frase: rango, fecha o alcance>"}]}'
     )
 
+    import time
+    if gemini_sin_cuota():
+        _registrar_error(f"Gemini en pausa por cuota agotada; se usó la búsqueda web de respaldo. {gemini_sin_cuota()}")
+        return {}
+
     respuesta = None
     intentos = []
     probados = []
+    errores_cuota = []
 
     def _intentar(nombre_modelo):
         probados.append(nombre_modelo)
@@ -386,13 +418,23 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
             return None, error
 
     pendientes_modelos = list(_modelos_a_probar(modelo))
-    while pendientes_modelos:
+    agotado = False
+    while pendientes_modelos and len(probados) < MAX_INTENTOS_GEMINI:
         nombre_modelo = pendientes_modelos.pop(0)
         if nombre_modelo in probados:
             continue
         respuesta, error = _intentar(nombre_modelo)
         if respuesta is not None:
             break
+        if _es_error_de_cuota(error):
+            errores_cuota.append(nombre_modelo)
+            if len(errores_cuota) >= 2 or "lite" in nombre_modelo:
+                agotado = True
+                break
+            # Un solo intento más, con un modelo "lite" (cuota separada).
+            lite = next((m for m in pendientes_modelos if "lite" in m), None)
+            pendientes_modelos = [lite] if lite else []
+            continue
         if not _es_error_de_modelo(error):
             break
         # Google suele decir qué modelo usar ("Please update your code to
@@ -401,15 +443,25 @@ def _buscar_precios_mercado_gemini_lote(items, api_key=None, modelo=None):
         if sugerido and sugerido.group(1) not in probados:
             pendientes_modelos.insert(0, sugerido.group(1))
     else:
-        # Ninguno de la lista existe para esta clave: preguntarle a Google
-        # cuáles sí tiene y probar esos.
-        for nombre_modelo in _modelos_disponibles_en_la_clave(cliente, probados):
-            respuesta, error = _intentar(nombre_modelo)
-            if respuesta is not None or not _es_error_de_modelo(error):
-                break
+        if respuesta is None and not errores_cuota and len(probados) < MAX_INTENTOS_GEMINI + 2:
+            # Ninguno de la lista existe para esta clave: preguntarle a
+            # Google cuáles sí tiene y probar como máximo dos.
+            for nombre_modelo in _modelos_disponibles_en_la_clave(cliente, probados)[:2]:
+                respuesta, error = _intentar(nombre_modelo)
+                if respuesta is not None or not _es_error_de_modelo(error):
+                    break
+    if respuesta is None and (agotado or errores_cuota):
+        _cuota["agotada_hasta"] = time.time() + PAUSA_CUOTA_S
+        _cuota["mensaje"] = (
+            f"Gemini sin cuota (429) en {', '.join(errores_cuota)}; durante 15 min se usa directamente "
+            "la búsqueda web de respaldo."
+        )
 
     if respuesta is None:
-        _registrar_error("Gemini: ningún modelo respondió a la búsqueda. Intentos -> " + " | ".join(intentos))
+        _registrar_error(
+            (_cuota["mensaje"] + " " if errores_cuota else "")
+            + "Gemini: ningún modelo respondió a la búsqueda. Intentos -> " + " | ".join(intentos)
+        )
         return {}
 
     texto = getattr(respuesta, "text", None)
@@ -853,11 +905,19 @@ def buscar_precios_mercado_lote(items, api_key=None, modelo=None, tavily_api_key
 
     salida = _buscar_precios_mercado_gemini_lote(items, api_key=api_key, modelo=modelo)
     pendientes = [it for it in items if not salida.get(str(it["id"]), {}).get("tiene_dato")]
-    # Si Gemini devolvió una coincidencia no verificable, intentar Tavily
-    # solo para esa partida y conservar los precios confirmados del lote.
-    if pendientes and _tavily_disponible(tavily_api_key):
-        respaldo = _buscar_precios_mercado_tavily_lote(pendientes, api_key=tavily_api_key)
+    # Respaldo: investiga cada partida pendiente (Gemini sin cuota, sin
+    # clave o sin precio verificable) leyendo el CONTENIDO de las páginas.
+    if pendientes:
+        import busqueda_web_respaldo
+        respaldo = busqueda_web_respaldo.investigar_lote(
+            pendientes, tavily_key=_obtener_tavily_key(tavily_api_key), registrar_error=_registrar_error,
+        )
         for id_, dato in respaldo.items():
             if dato.get("tiene_dato") or id_ not in salida:
+                previo = salida.get(id_)
+                if previo and not dato.get("tiene_dato"):
+                    continue
+                if previo and previo.get("nota"):
+                    dato["nota"] = f"{dato['nota']} (Gemini: {previo['nota']})"
                 salida[id_] = dato
     return salida

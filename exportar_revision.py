@@ -33,6 +33,7 @@ except ImportError:  # el servidor aún no instala requirements.txt
 import validacion_referencias as v
 
 FUENTES = ("historico", "nl", "cdmx", "ia")
+PF = 6   # columnas por fuente en la hoja 'Por fuente'
 NOMBRE_CORTO = {"historico": "Histórico", "nl": "Nuevo León", "cdmx": "CDMX", "ia": "IA internet"}
 
 AZUL, AZUL2 = "#1F3864", "#2E5496"
@@ -150,27 +151,32 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # ==================================================================
     # Hoja 1: Resumen
     # ==================================================================
+    # Única captura: Cantidad y P.U. cotizado se escriben aquí; las demás
+    # hojas los toman de esta. P.U. de referencia y estado de cada fuente
+    # se capturan en 'Por fuente'; dictamen, semáforo final, referencia,
+    # respaldo y ahorro se recalculan con fórmulas a partir de ellos.
     ws = wb.add_worksheet("Resumen")
     cab_ini = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado"]
+    sub_fuente = ["P.U. ref.", "Diferencia $/u", "% vs ref.", "Dictamen", "Confiabilidad"]
+    NF = len(sub_fuente)
     cab_fin = ["Semáforo final", "Referencia", "Respaldo", "P.U. de referencia",
                "% vs referencia", "Diferencia contra referencia", "Ahorro respaldado", "Nota"]
-    n_cols = len(cab_ini) + 3 * len(FUENTES) + len(cab_fin)
+    n_cols = len(cab_ini) + NF * len(FUENTES) + len(cab_fin)
     ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
     ws.set_row(0, 26)
     ws.write(1, 0, f"Proveedor: {proveedor or '—'} · Proyecto: {proyecto or '—'} · "
                    f"Generado {hoy:%d/%m/%Y}. {configuracion} Cada fuente se compara por separado (sin promediar). "
-                   "P.U. de color = VALIDADA; gris cursiva = orientativa; tachado = rechazada. P.U. y estado "
-                   "vienen de la hoja 'Por fuente': corrígelos ahí y todo se recalcula.", f_sub)
-    # Encabezados en dos niveles: fuente arriba, P.U./estado/% abajo.
+                   "Color fuerte = validado; color claro = orientativo (pendiente de validar, no es ahorro); "
+                   "tachado = rechazada. Azul = captura: Cantidad y P.U. aquí; P.U. de referencia y estado en "
+                   "'Por fuente'. Todo lo demás se recalcula.", f_sub)
     for c, texto in enumerate(cab_ini):
         ws.merge_range(3, c, 4, c, texto, f_cab)
     for j, clave in enumerate(FUENTES):
-        c0 = len(cab_ini) + j * 3
-        ws.merge_range(3, c0, 3, c0 + 2, NOMBRE_CORTO[clave], f_cab_fuente[clave])
-        ws.write(4, c0, "P.U. ref.", f_cab_fuente[clave])
-        ws.write(4, c0 + 1, "Estado", f_cab_fuente[clave])
-        ws.write(4, c0 + 2, "% vs cotizado", f_cab_fuente[clave])
-    c_fin = len(cab_ini) + 3 * len(FUENTES)
+        c0 = len(cab_ini) + j * NF
+        ws.merge_range(3, c0, 3, c0 + NF - 1, NOMBRE_CORTO[clave], f_cab_fuente[clave])
+        for k, t in enumerate(sub_fuente):
+            ws.write(4, c0 + k, t, f_cab_fuente[clave])
+    c_fin = len(cab_ini) + NF * len(FUENTES)
     for k, texto in enumerate(cab_fin):
         ws.merge_range(3, c_fin + k, 4, c_fin + k, texto, f_cab)
     ws.set_row(4, 28)
@@ -178,9 +184,11 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     fila0 = 5
     total_importe = 0.0
     total_ahorro = 0.0
+    fila_resumen = {}   # partida -> número de fila de Excel (1-based) en Resumen
     for i, f in enumerate(filas):
         r = fila0 + i
-        R = r + 1  # número de fila de Excel
+        R = r + 1
+        fila_resumen[str(f.get("Partida"))] = R
         evs = f.get("_evaluaciones") or {}
         fin = f.get("_final") or {}
         cantidad = _num(f.get("Cantidad"))
@@ -195,47 +203,69 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ws.write_number(r, 4, precio or 0, f_input_mon)
         ws.write_formula(r, 5, f"=D{R}*E{R}", f_mon, importe)
 
+        celdas_dict, celdas_ref, celdas_est = [], [], []
         for j, clave in enumerate(FUENTES):
-            c0 = len(cab_ini) + j * 3
+            c0 = len(cab_ini) + j * NF
             ev = evs.get(clave) or {}
             ref = _num(ev.get("precio_referencia"))
             estado = ev.get("estado", v.SIN_DATO)
-            col_ref = xl_col_to_name(c0)
-            col_est = xl_col_to_name(c0 + 1)
-            # Vinculado a "Por fuente" (misma partida, misma fuente).
-            origen_ref = f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 4 + j * 4)}"
-            origen_est = f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 5 + j * 4)}"
-            ws.write_formula(r, c0, f'=IF({origen_ref}="","",{origen_ref})',
-                             estilo_ref(ev) if ref is not None else f_mon,
-                             ref if ref is not None else "")
-            ws.write_formula(r, c0 + 1, f"={origen_est}", f_estado.get(estado, f_centro), estado)
-            pct = (precio / ref - 1) if (ref and precio is not None
-                                        and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
+            pf = lambda k: f"'Por fuente'!{xl_rowcol_to_cell(4 + i, 4 + j * PF + k)}"
+            col = lambda k: xl_col_to_name(c0 + k)
+            ws.write_formula(r, c0, f'=IF({pf(0)}="","",{pf(0)})',
+                             estilo_ref(ev) if ref is not None else f_mon, ref if ref is not None else "")
+            excluida = estado in (v.RECHAZADA, v.SIN_DATO)
             ws.write_formula(
-                r, c0 + 2,
-                f'=IF(OR({col_ref}{R}="",{col_est}{R}="RECHAZADA",{col_est}{R}="SIN DATO"),"",E{R}/{col_ref}{R}-1)',
-                f_pct, pct,
-            )
+                r, c0 + 1, f'=IF(OR({col(0)}{R}="",{pf(1)}="RECHAZADA",{pf(1)}="SIN DATO"),"",E{R}-{col(0)}{R})',
+                f_dif_mon, (precio - ref) if (ref and precio is not None and not excluida) else "")
+            ws.write_formula(
+                r, c0 + 2, f'=IF({col(1)}{R}="","",E{R}/{col(0)}{R}-1)',
+                f_pct, (precio / ref - 1) if (ref and precio is not None and not excluida) else "")
+            ws.write_formula(r, c0 + 3, f"={pf(3)}", f_centro, v.dictamen_texto(ev))
+            ws.write_formula(r, c0 + 4, f"={pf(4)}", f_centro, v.confiabilidad_texto(ev))
+            celdas_dict.append(f"{col(3)}{R}")
+            celdas_ref.append(f"{col(0)}{R}")
+            celdas_est.append(pf(1))
 
+        # --- Semáforo final, referencia y respaldo: fórmulas sobre los
+        # dictámenes (que a su vez salen de los estados de 'Por fuente').
+        es_val = [f'LEFT({d},8)="Validado"' for d in celdas_dict]
+        clase = [f"MID({d},12,20)" for d in celdas_dict]
+        n_val = "+".join(f"({x})" for x in es_val)
+        n_ori = "+".join(f'(LEFT({d},11)="Orientativo")' for d in celdas_dict)
+        primera = '""'
+        for x, c in reversed(list(zip(es_val, clase))):
+            primera = f"IF({x},{c},{primera})"
+        iguales = ",".join(f"OR(NOT({x}),{c}={primera})" for x, c in zip(es_val, clase))
+        f_sem = (f'=IF(({n_val})=0,IF(({n_ori})>0,"{v.NO_CONCLUYENTE}","{v.SIN_VALIDADA}"),'
+                 f'IF(AND({iguales}),IF({primera}="caro","ALTO",IF({primera}="barato","BAJO","EN MERCADO")),"MIXTO"))')
         semaforo = fin.get("semaforo") or v.SIN_VALIDADA
-        ws.write(r, c_fin, semaforo, f_semaforo.get(semaforo, f_semaforo["OTRO"]))
-        ws.write(r, c_fin + 1, fin.get("referencia_negociacion") or "—", f_txt)
+        ws.write_formula(r, c_fin, f_sem, f_semaforo.get(semaforo, f_semaforo["OTRO"]), semaforo)
+        semaforo_cf(ws, f"{xl_col_to_name(c_fin)}{R}")
+
+        nombres = [v.NOMBRE_FUENTE[k] for k in FUENTES]
+        f_ref_txt = '"—"'
+        for est, nombre in reversed(list(zip(celdas_est, nombres))):
+            f_ref_txt = f'IF({est}="{v.EQUIVALENCIA_PARCIAL}","{nombre}",{f_ref_txt})'
+        for x, nombre in reversed(list(zip(es_val, nombres))):
+            f_ref_txt = f'IF({x},"{nombre}",{f_ref_txt})'
+        col_refn = xl_col_to_name(c_fin + 1)
+        ws.write_formula(r, c_fin + 1, "=" + f_ref_txt, f_txt, fin.get("referencia_negociacion") or "—")
         respaldo = fin.get("respaldo") or "—"
-        ws.write(r, c_fin + 2, respaldo, f_estado.get(v.VALIDADA if respaldo == "VALIDADA" else v.NO_CONCLUYENTE, f_centro))
+        ws.write_formula(
+            r, c_fin + 2,
+            f'=IF(({n_val})>0,"VALIDADA",IF({col_refn}{R}<>"—","PENDIENTE DE VALIDAR","—"))',
+            f_estado.get(v.VALIDADA if respaldo == "VALIDADA" else v.NO_CONCLUYENTE, f_centro), respaldo)
+        f_pu = '""'
+        for celda, nombre in reversed(list(zip(celdas_ref, nombres))):
+            f_pu = f'IF({col_refn}{R}="{nombre}",{celda},{f_pu})'
         ref_neg = _num(fin.get("precio_negociacion"))
-        clave_neg = next((k for k, n in v.NOMBRE_FUENTE.items()
-                          if n == fin.get("referencia_negociacion")), None)
-        if clave_neg:
-            celda_ref = xl_rowcol_to_cell(r, len(cab_ini) + FUENTES.index(clave_neg) * 3)
-            ws.write_formula(r, c_fin + 3, f"={celda_ref}", f_mon_neg, ref_neg or "")
-        else:
-            ws.write_blank(r, c_fin + 3, None, f_mon_neg)
+        ws.write_formula(r, c_fin + 3, "=" + f_pu, f_mon_neg, ref_neg if ref_neg is not None else "")
         col_neg = xl_col_to_name(c_fin + 3)
         col_resp = xl_col_to_name(c_fin + 2)
         pct_neg = (precio / ref_neg - 1) if (ref_neg and precio is not None) else ""
         ws.write_formula(r, c_fin + 4, f'=IF({col_neg}{R}="","",E{R}/{col_neg}{R}-1)', f_pct, pct_neg)
         dif = round((precio - ref_neg) * (cantidad or 0), 2) if (ref_neg and precio is not None) else ""
-        ws.write_formula(r, c_fin + 5, f'=IF({col_neg}{R}="","",(E{R}-{col_neg}{R})*D{R})', f_mon, dif)
+        ws.write_formula(r, c_fin + 5, f'=IF({col_neg}{R}="","",(E{R}-{col_neg}{R})*D{R})', f_dif_mon, dif)
         # Ahorro solo si la referencia está VALIDADA y el cotizado supera el ±5 %.
         ahorro = _num(fin.get("ahorro_potencial")) or 0.0
         total_ahorro += ahorro
@@ -247,8 +277,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         )
         ws.write(r, c_fin + 7, fin.get("detalle") or "", f_txt)
 
-    ultima = fila0 + len(filas)  # fila (0-based) del total
-    U = ultima  # última fila de datos en Excel = ultima (1-based)
+    ultima = fila0 + len(filas)
+    U = ultima
     ws.write(ultima, 1, "TOTAL", f_bold)
     ws.write_formula(ultima, 5, f"=SUM(F{fila0 + 1}:F{U})", f_mon_neg, total_importe)
     col_ah = xl_col_to_name(c_fin + 6)
@@ -257,7 +287,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     ws.write_formula(ultima + 1, c_fin + 6, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
                      (total_ahorro / total_importe) if total_importe else "")
 
-    anchos = [5, 44, 8, 10, 13, 15] + [12, 20, 11] * len(FUENTES) + [24, 14, 20, 14, 12, 16, 15, 44]
+    anchos = [5, 44, 8, 10, 13, 15] + [12, 13, 9, 20, 14] * len(FUENTES) + [24, 16, 20, 14, 12, 16, 15, 44]
     for c, ancho in enumerate(anchos):
         ws.set_column(c, c, ancho)
     ws.freeze_panes(5, 2)
@@ -273,7 +303,8 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         wc.merge_range(0, 0, 0, 7, "Revisión de cantidades y aritmética", f_titulo)
         wc.set_row(0, 26)
         wc.write(1, 0, "Diferencias SUJETAS A ACLARACIÓN con el generador de volúmenes del proveedor; "
-                       "no son ahorros confirmados. Azul = dato de la cotización.", f_sub)
+                       "no son ahorros confirmados. Cantidad y P.U. vienen del Resumen (única captura); el importe "
+                       "declarado (azul) es el de la cotización.", f_sub)
         cab_a = ["#", "Concepto", "Unidad", "Cantidad", "P.U.", "Importe declarado",
                  "Cantidad × P.U.", "Diferencia"]
         for c, t in enumerate(cab_a):
@@ -284,8 +315,13 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wc.write(r, 0, a["partida"], f_centro)
             wc.write(r, 1, a["concepto"], f_txt)
             wc.write(r, 2, a["unidad"], f_centro)
-            wc.write_number(r, 3, a["cantidad"] or 0, f_input_num)
-            wc.write_number(r, 4, a["precio_unitario"] or 0, f_input_mon)
+            Rr = fila_resumen.get(str(a["partida"]))
+            if Rr:   # una sola captura: cantidad y P.U. vienen del Resumen
+                wc.write_formula(r, 3, f"=Resumen!D{Rr}", fmt(num_format="#,##0.00"), a["cantidad"] or 0)
+                wc.write_formula(r, 4, f"=Resumen!E{Rr}", f_mon, a["precio_unitario"] or 0)
+            else:
+                wc.write_number(r, 3, a["cantidad"] or 0, f_input_num)
+                wc.write_number(r, 4, a["precio_unitario"] or 0, f_input_mon)
             if a["importe_declarado"] is not None:
                 wc.write_number(r, 5, a["importe_declarado"], f_input_mon)
             else:
@@ -352,32 +388,46 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # ==================================================================
     if datos_mercado and datos_mercado.get("resumen"):
         wmk = wb.add_worksheet("Mercado")
-        wmk.merge_range(0, 0, 0, 10, "Datos de mercado para comparar", f_titulo)
+        wmk.merge_range(0, 0, 0, 13, "Datos de mercado para comparar", f_titulo)
         wmk.set_row(0, 26)
         wmk.write(1, 0, "Precios reales publicados: NL = licitaciones de obra pública (mediana y rango p25–p75, "
                         "ajustado INPC); CDMX = tabulador oficial 2026. Orientativos: la equivalencia exacta no "
                         "está demostrada. Se excluyen materiales distintos y cifras de otra escala.", f_sub)
-        cab_r = ["#", "Concepto", "Unidad", "P.U. cotizado", "Referencias", "Tipo", "Mínimo",
-                 "Mediana de referencias", "Máximo", "Cotizado vs mediana", "Dónde cae el cotizado"]
+        # Cada fuente por separado: NL con sus percentiles p25/p75 de precios
+        # contratados (no son mínimo ni máximo) y CDMX con su propio
+        # concepto y especificación. No se mezclan en un solo rango.
+        cab_r = ["#", "Concepto", "Unidad", "P.U. cotizado",
+                 "NL · concepto más parecido", "NL · p25", "NL · mediana", "NL · p75", "NL · registros / periodo",
+                 "Cotizado vs mediana NL", "CDMX · concepto más parecido", "CDMX · precio", "Cotizado vs CDMX",
+                 "Dónde cae el cotizado"]
         for c, t in enumerate(cab_r):
             wmk.write(3, c, t, f_cab)
+        wmk.set_row(3, 30)
         r = 4
         for m in datos_mercado["resumen"]:
             R = r + 1
+            Rr = fila_resumen.get(str(m["partida"]))
             wmk.write(r, 0, m["partida"], f_centro)
             wmk.write(r, 1, m["concepto"], f_txt)
             wmk.write(r, 2, m["unidad"], f_centro)
-            wmk.write_number(r, 3, m["precio_cotizado"], f_input_mon)
-            wmk.write_number(r, 4, m["referencias"], f_centro)
-            wmk.write(r, 5, m["tipo"], f_txt)
-            for c, campo in ((6, "minimo"), (7, "mediana_referencias"), (8, "maximo")):
-                if m[campo] is not None:
+            if Rr:
+                wmk.write_formula(r, 3, f"=Resumen!E{Rr}", f_mon, m["precio_cotizado"])
+            else:
+                wmk.write_number(r, 3, m["precio_cotizado"], f_input_mon)
+            wmk.write(r, 4, m.get("nl_concepto") or "—", f_txt)
+            for c, campo in ((5, "nl_p25"), (6, "nl_mediana"), (7, "nl_p75"), (11, "cdmx_precio")):
+                if m.get(campo) is not None:
                     wmk.write_number(r, c, m[campo], f_mon)
                 else:
                     wmk.write_blank(r, c, None, f_mon)
-            pct = (m["precio_cotizado"] / m["mediana_referencias"] - 1) if m["mediana_referencias"] else ""
-            wmk.write_formula(r, 9, f'=IF(H{R}="","",D{R}/H{R}-1)', f_pct, pct)
-            wmk.write(r, 10, m["posicion"], f_txt)
+            wmk.write(r, 8, (f"{m['nl_registros']} registros · {m.get('nl_periodo') or ''}"
+                             if m.get("nl_registros") else "—"), f_txt)
+            wmk.write_formula(r, 9, f'=IF(G{R}="","",D{R}/G{R}-1)', f_pct,
+                              (m["precio_cotizado"] / m["nl_mediana"] - 1) if m.get("nl_mediana") else "")
+            wmk.write(r, 10, m.get("cdmx_concepto") or "—", f_txt)
+            wmk.write_formula(r, 12, f'=IF(L{R}="","",D{R}/L{R}-1)', f_pct,
+                              (m["precio_cotizado"] / m["cdmx_precio"] - 1) if m.get("cdmx_precio") else "")
+            wmk.write(r, 13, m["posicion"], f_txt)
             r += 1
         r += 1
         cab_d = ["#", "Fuente", "Concepto de referencia", "Relación", "Unidad", "Precio (mediana)",
@@ -401,7 +451,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wmk.write(r, 9, ref["fecha"], f_txt)
             wmk.write(r, 10, f"{ref['equivalencia']} · {ref['posicion']}", f_txt)
             r += 1
-        for c, ancho in enumerate([5, 44, 10, 36, 14, 22, 12, 16, 12, 18, 44]):
+        for c, ancho in enumerate([5, 40, 10, 36, 40, 12, 12, 12, 22, 12, 40, 12, 12, 40]):
             wmk.set_column(c, c, ancho)
         wmk.hide_gridlines(2)
         wmk.set_landscape()
@@ -414,13 +464,16 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     cab_f = ["#", "Concepto", "Unidad", "P.U. cotizado"]
     for clave in FUENTES:
         n = NOMBRE_CORTO[clave]
-        cab_f += [f"{n}\nP.U. ref.", f"{n}\nestado", f"{n}\n% vs cotizado", f"{n}\nsemáforo"]
+        cab_f += [f"{n}\nP.U. ref.", f"{n}\nestado", f"{n}\n% vs ref.", f"{n}\ndictamen",
+                  f"{n}\nconfiabilidad", f"{n}\nfalta confirmar"]
     wf.merge_range(0, 0, 0, len(cab_f) - 1, "Comparación independiente por fuente", f_titulo)
     wf.set_row(0, 26)
-    wf.write(1, 0, "Semáforo por fuente solo para referencias VALIDADAS: ±5 % = EN MERCADO. "
-                   "El P.U. de referencia se puede corregir aquí y las fórmulas se recalculan.", f_sub)
+    wf.write(1, 0, "Azul = captura. Cambia aquí el P.U. de referencia o el estado (VALIDADA, EQUIVALENCIA PARCIAL, "
+                   "NO CONCLUYENTE, POR CONFIRMAR, RECHAZADA, SIN DATO) y el dictamen, el semáforo final, la "
+                   "referencia y el respaldo del Resumen se recalculan. ±5 % = en mercado. El P.U. cotizado viene "
+                   "del Resumen.", f_sub)
     for c, texto in enumerate(cab_f):
-        wf.write(3, c, texto, f_cab_fuente.get(FUENTES[(c - 4) // 4], f_cab) if c >= 4 else f_cab)
+        wf.write(3, c, texto, f_cab_fuente.get(FUENTES[(c - 4) // PF], f_cab) if c >= 4 else f_cab)
     wf.set_row(3, 42)
     for i, f in enumerate(filas):
         r = 4 + i
@@ -429,10 +482,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         wf.write(r, 0, f.get("Partida"), f_centro)
         wf.write(r, 1, f.get("Concepto"), f_txt)
         wf.write(r, 2, f.get("Unidad"), f_centro)
-        wf.write_number(r, 3, precio or 0, f_input_mon)
+        wf.write_formula(r, 3, f"=Resumen!E{fila0 + 1 + i}", f_mon, precio or 0)
         evs = f.get("_evaluaciones") or {}
         for j, clave in enumerate(FUENTES):
-            c0 = 4 + j * 4
+            c0 = 4 + j * PF
             ev = evs.get(clave) or {}
             ref = _num(ev.get("precio_referencia"))
             estado = ev.get("estado", v.SIN_DATO)
@@ -442,18 +495,30 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             else:
                 wf.write_blank(r, c0, None, f_input_mon)
             wf.write(r, c0 + 1, estado, f_estado.get(estado, f_centro))
+            wf.data_validation(r, c0 + 1, r, c0 + 1, {
+                "validate": "list",
+                "source": [v.VALIDADA, v.EQUIVALENCIA_PARCIAL, v.NO_CONCLUYENTE, v.POR_CONFIRMAR,
+                           v.RECHAZADA, v.SIN_DATO],
+            })
             pct = (precio / ref - 1) if (ref and precio is not None
                                         and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
             wf.write_formula(r, c0 + 2,
                              f'=IF(OR({cr}{R}="",{ce}{R}="RECHAZADA",{ce}{R}="SIN DATO"),"",D{R}/{cr}{R}-1)',
                              f_pct, pct)
-            sem = _clasif(precio, ref) if estado == v.VALIDADA else ""
-            wf.write_formula(r, c0 + 3,
-                             f'=IF({ce}{R}<>"VALIDADA","",IF(D{R}>{cr}{R}*1.05,"ALTO",'
-                             f'IF(D{R}<{cr}{R}*0.95,"BAJO","EN MERCADO")))',
-                             f_centro, sem)
-            semaforo_cf(wf, f"{xl_col_to_name(c0 + 3)}{R}")
-    anchos_f = [5, 44, 8, 13] + [12, 15, 11, 12] * len(FUENTES)
+            clas = f'IF(D{R}>{cr}{R}*1.05,"caro",IF(D{R}<{cr}{R}*0.95,"barato","en mercado"))'
+            wf.write_formula(
+                r, c0 + 3,
+                f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin referencia",IF({ce}{R}="RECHAZADA","Rechazada",'
+                f'IF({ce}{R}="VALIDADA","Validado · ","Orientativo · ")&{clas}))',
+                f_centro, v.dictamen_texto(ev))
+            conf_orient = v.confiabilidad_texto(dict(ev, estado=v.NO_CONCLUYENTE)) if ref is not None else "—"
+            wf.write_formula(
+                r, c0 + 4,
+                f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO",{ce}{R}="RECHAZADA"),"—",'
+                f'IF({ce}{R}="VALIDADA","Alta (validada)","{conf_orient}"))',
+                f_centro, v.confiabilidad_texto(ev))
+            wf.write(r, c0 + 5, v.falta_confirmar(ev, f.get("Concepto")), f_txt)
+    anchos_f = [5, 44, 8, 13] + [12, 15, 10, 20, 13, 34] * len(FUENTES)
     for c, ancho in enumerate(anchos_f):
         wf.set_column(c, c, ancho)
     wf.freeze_panes(4, 4)
@@ -465,9 +530,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # Hoja 3: Evidencia
     # ==================================================================
     we = wb.add_worksheet("Evidencia")
-    cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "Estado", "Motivo / verificaciones",
+    cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "Estado", "Observaciones (motivo)",
              "Concepto encontrado en la fuente", "Confianza texto", "P.U. referencia",
-             "Revisión IA", "Evidencia web (frase o URL)"]
+             "Revisión IA", "Evidencia web (frase o URL)", "Dictamen", "Confiabilidad",
+             "Falta confirmar", "Fecha del precio", "Fecha de consulta"]
     we.merge_range(0, 0, 0, len(cab_e) - 1, "Evidencia de cada referencia", f_titulo)
     we.set_row(0, 26)
     we.write(1, 0, "Por qué cada referencia quedó VALIDADA, NO CONCLUYENTE, POR CONFIRMAR, "
@@ -493,9 +559,14 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             else:
                 we.write_blank(r, 8, None, f_mon)
             we.write(r, 9, ev.get("revision_ia") or "", f_txt)
-            we.write(r, 10, ev.get("evidencia") or "", f_txt)
+            we.write(r, 10, " · ".join(x for x in (ev.get("fuente_web"), ev.get("evidencia")) if x), f_txt)
+            we.write(r, 11, v.dictamen_texto(ev), f_centro)
+            we.write(r, 12, v.confiabilidad_texto(ev), f_centro)
+            we.write(r, 13, v.falta_confirmar(ev, f.get("Concepto")), f_txt)
+            we.write(r, 14, ev.get("fecha") or ("no indicada" if estado != v.SIN_DATO else ""), f_centro)
+            we.write(r, 15, ev.get("fecha_consulta") or "", f_centro)
             r += 1
-    for c, ancho in enumerate([5, 38, 8, 16, 16, 44, 50, 11, 14, 44, 50]):
+    for c, ancho in enumerate([5, 38, 8, 16, 16, 44, 50, 11, 14, 44, 50, 20, 14, 40, 14, 14]):
         we.set_column(c, c, ancho)
     we.freeze_panes(4, 4)
     we.hide_gridlines(2)
@@ -522,8 +593,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
         ("Sin confirmar", "Sin CONFIRMA de la IA la referencia queda POR CONFIRMAR (orientativa)."),
         ("Diferencia vs. ahorro", "Contra una referencia VALIDADA la diferencia es ahorro respaldado; contra una orientativa es "
                                   "'diferencia contra referencia, pendiente de validar'."),
-        ("Precio web", "Debe aparecer en la misma frase que el concepto y la unidad. Un fragmento web sin validar es orientativo; "
-                       "solo un precio de Gemini con fuente y frase verificadas puede quedar VALIDADO."),
+        ("Precio web", "Gemini con Google Search; si no hay cuota, el respaldo busca cada partida por material, trabajo y "
+                       "unidad, abre las páginas y toma el precio solo del renglón donde aparecen juntos el concepto, la "
+                       "unidad y el precio. Es orientativo (confiabilidad media o baja); solo un precio de Gemini con "
+                       "fuente y frase verificadas puede quedar VALIDADO."),
         ("Sin promedios", "Cada fuente se compara por separado. El P.U. de negociación sale de UNA referencia validada, con prioridad: "
                           "Histórico Ragasa > Nuevo León > CDMX > IA internet."),
         ("Semáforo final", "Todas las validadas coinciden = ese semáforo. Si discrepan = MIXTO. Sin validadas pero con orientativas = "

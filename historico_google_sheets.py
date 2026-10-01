@@ -217,14 +217,34 @@ class HistoricoGoogleSheets:
             return {'match': None, 'motivo': f'historico vacio o sin unidad {u} todavia'}
 
         choices = pool['concepto_norm'].tolist()
-        result = process.extractOne(t, choices, scorer=score_combinado, score_cutoff=min_score)
+        # Misma búsqueda por material + trabajo + unidad que NL/CDMX: el
+        # texto original, su versión de catálogo y las equivalencias
+        # ("columnas para barda" = castillo; "cerramiento" = dala/cadena).
+        # Se rechazan elementos, materiales o trabajos distintos.
+        try:
+            from comparador_multifuente_v2 import consultas_catalogo, _referencia_compatible
+            consultas = consultas_catalogo(t)
+        except Exception:
+            consultas, _referencia_compatible = [t], (lambda a, b: True)
+
+        def _mejor(umbral):
+            mejor = None
+            for consulta in consultas:
+                for _, score, idx in process.extract(consulta, choices, scorer=score_combinado,
+                                                     score_cutoff=umbral, limit=10):
+                    if not _referencia_compatible(t, choices[idx]):
+                        continue
+                    if mejor is None or score > mejor[1]:
+                        mejor = (choices[idx], score, idx)
+                    break
+            return mejor
+
+        result = _mejor(min_score)
         confianza = None
         if result is None and min_score > UMBRAL_CONFIANZA_BAJA:
             # Segunda pasada con umbral relajado: mejor ofrecer una
             # referencia debil marcada "revisar" que ninguna.
-            result = process.extractOne(
-                t, choices, scorer=score_combinado, score_cutoff=UMBRAL_CONFIANZA_BAJA
-            )
+            result = _mejor(UMBRAL_CONFIANZA_BAJA)
             confianza = 'BAJA' if result is not None else None
         if result is None:
             return {'match': None, 'motivo': f'sin coincidencia ni relajada en el historico (unidad {u})'}

@@ -182,6 +182,60 @@ def consulta_catalogo(t: str) -> str:
     return q
 
 
+# Búsqueda por MATERIAL + TRABAJO + UNIDAD: el nombre que usa el
+# contratista ("columnas para amarrar barda", "cerramiento") no es el que
+# usan los tabuladores ("castillo de concreto", "dala/cadena de concreto").
+# Cada regla agrega consultas de catálogo adicionales; la comparación sigue
+# exigiendo la MISMA unidad y se rechaza cualquier referencia de otro
+# elemento o material (ver _referencia_compatible).
+_EQUIVALENCIAS_TRABAJO = [
+    (r'\b(CERRAMIENTO|DALA|CADENA)S?\b', [
+        'DALA DE CONCRETO ARMEX', 'CADENA DE CONCRETO ARMEX',
+        'DALA DE CONCRETO REFORZADO CON VARILLAS Y ESTRIBOS',
+        'CADENA DE CONCRETO REFORZADO CON VARILLAS Y ESTRIBOS',
+    ]),
+    (r'\b(CASTILLO|COLUMNAS? (PARA AMARRAR|DE AMARRE|DE BARDA|DE CONFINAMIENTO))', [
+        'CASTILLO DE CONCRETO ARMEX', 'CASTILLO DE CONCRETO AHOGADO CON VARILLA',
+        'CASTILLO DE CONCRETO 15 X 15',
+    ]),
+    (r'\bESTUCO\b', ['APLANADO DE ESTUCO EN MUROS', 'APLANADO FINO EN MUROS']),
+    (r'\bMURO DE BLOCK\b', ['MURO DE BLOCK DE CONCRETO']),
+]
+
+
+def consultas_catalogo(t: str) -> list:
+    """Todas las consultas a probar para un concepto normalizado: el texto
+    original, su versión de catálogo y las equivalencias de trabajo."""
+    consultas = [t, consulta_catalogo(t)]
+    base = consulta_catalogo(t)
+    espesor = re.search(r'\b\d+ X \d+( X \d+)?\b', base)
+    try:
+        from validacion_referencias import elemento_principal
+        elemento = elemento_principal(t)
+    except Exception:
+        elemento = None
+    for patron, alternas in _EQUIVALENCIAS_TRABAJO:
+        # Solo el elemento PRINCIPAL de la partida: "cerramiento para
+        # sostener muro de block" se busca como dala, no como muro.
+        clave = {'cerramiento': 'CERRAMIENTO', 'castillo': 'CASTILLO', 'muro': 'MURO'}.get(elemento)
+        if elemento and clave and clave not in patron and 'ESTUCO' not in patron:
+            continue
+        if re.search(patron, f' {t} '):
+            for alterna in alternas:
+                consultas.append(f'{alterna} {espesor.group(0)}' if espesor and 'BLOCK' in alterna else alterna)
+    return [c for c in dict.fromkeys(consultas) if c]
+
+
+def _referencia_compatible(cotizado: str, referencia: str) -> bool:
+    """Rechaza materiales o elementos distintos (castillo vs cerramiento,
+    columna metálica vs castillo de concreto...)."""
+    try:
+        from validacion_referencias import alcance_distinto
+    except Exception:
+        return True
+    return not alcance_distinto(cotizado, referencia)
+
+
 # Unidades equivalentes que en las bases reales aparecen escritas de
 # formas distintas para la MISMA unidad fisica (confirmado revisando
 # Base_Precios_Unitarios_Nuevo_Leon_REAL.xlsx: "pieza" aparece como PZA,
@@ -835,10 +889,9 @@ class ComparadorMultiFuente:
     ):
         """Busca con el texto original y con su version de catalogo
         (consulta_catalogo) y se queda con la mejor coincidencia."""
-        resultado = self._match_pool_texto(pools, t, u, min_score, scorer, text_col)
-        alterna = consulta_catalogo(t)
-        if alterna and alterna != t:
-            otro = self._match_pool_texto(pools, alterna, u, min_score, scorer, text_col)
+        resultado = None
+        for consulta in consultas_catalogo(t):
+            otro = self._match_pool_texto(pools, consulta, u, min_score, scorer, text_col, original=t)
             if otro and (resultado is None or otro[0] > resultado[0]):
                 resultado = otro
         return resultado
@@ -851,6 +904,7 @@ class ComparadorMultiFuente:
         min_score,
         scorer,
         text_col='concepto_norm',
+        original=None,
     ):
         """Busca la mejor coincidencia dentro del pool de la unidad `u`.
 
@@ -923,6 +977,8 @@ class ComparadorMultiFuente:
                 )
                 if not compatible:
                     continue
+                if not _referencia_compatible(original or t, descripcion_referencia):
+                    continue
                 return float(score), row
             return None
 
@@ -948,9 +1004,7 @@ class ComparadorMultiFuente:
             return []
         choices = pool[text_col].fillna("").tolist()
         resultados = {}
-        for consulta in dict.fromkeys([t, consulta_catalogo(t)]):
-            if not consulta:
-                continue
+        for consulta in consultas_catalogo(t):
             pre = process.extract(consulta, choices, scorer=fuzz.token_set_ratio,
                                   score_cutoff=max(umbral - 25, 30), limit=60)
             for texto, _, indice in pre:
@@ -958,6 +1012,8 @@ class ComparadorMultiFuente:
                 if score < umbral or len(str(texto).strip()) < 8:
                     continue
                 if not validar_compatibilidad_tecnica(consulta, texto)[0]:
+                    continue
+                if not _referencia_compatible(t, texto):
                     continue
                 if indice not in resultados or score > resultados[indice]:
                     resultados[indice] = score

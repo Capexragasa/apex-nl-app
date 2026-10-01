@@ -11,3 +11,4 @@ google-genai
 plotly
 requests
 xlsxwriter
+ddgs
