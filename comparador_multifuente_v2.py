@@ -1103,7 +1103,8 @@ class ComparadorMultiFuente:
             banda_baja, banda_alta = banda_en_mercado(mediana_uso)
             veredicto = clasificar(precio_cotizado, banda_baja, banda_alta)
             resultado['fuentes']['nl_historico'] = {
-                'match': row['concepto_homologado'], 'score': round(score, 1),
+                'match': row['concepto_homologado'], 'score': round(score, 1), 'unidad': row['unidad'],
+                'fecha_min': str(row['fecha_min'])[:10], 'fecha_max': str(row['fecha_max'])[:10],
                 'confianza': confianza,
                 'precio_min': float(row['precio_min']), 'precio_p25': float(row['precio_p25']),
                 'precio_mediana': float(row['precio_mediana']), 'precio_p75': float(row['precio_p75']),
@@ -1154,6 +1155,7 @@ class ComparadorMultiFuente:
             low, high = banda_en_mercado(precio_ref)
             resultado['fuentes']['cdmx_gobierno'] = {
                 'match': row['concepto'], 'score': round(score, 1), 'clave': row['clave'],
+                'pagina': (None if pd.isna(row.get('pagina')) else row.get('pagina')), 'unidad': row['unidad'],
                 'confianza': confianza,
                 'precio_referencia': precio_ref, 'banda_baja': round(low, 2), 'banda_alta': round(high, 2),
                 'clasificacion': clasificar(precio_cotizado, low, high),

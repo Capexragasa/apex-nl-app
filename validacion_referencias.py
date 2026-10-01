@@ -50,6 +50,9 @@ NO_CONCLUYENTE = "NO CONCLUYENTE"
 POR_CONFIRMAR = "POR CONFIRMAR"
 RECHAZADA = "RECHAZADA"
 SIN_DATO = "SIN DATO"
+# Concepto parecido, pero el precio no se puede comparar: otra escala, o
+# precio por pieza con tamaño distinto o no declarado. No vota.
+NO_COMPARABLE = "NO COMPARABLE"
 
 ORIENTATIVAS = (EQUIVALENCIA_PARCIAL, NO_CONCLUYENTE, POR_CONFIRMAR)
 
@@ -264,6 +267,7 @@ def evaluar_fuente(
     precio: float,
     usar_ia: bool,
     precio_referencia: float | None = None,
+    unidad: str | None = None,
     fecha_dato=None,
     region: str | None = None,
     es_web: bool = False,
@@ -335,9 +339,21 @@ def evaluar_fuente(
         return _excluir(RECHAZADA, "especificación distinta: " + "; ".join(conflictos))
 
     if precio_referencia > precio * FACTOR_ESCALA or precio_referencia < precio / FACTOR_ESCALA:
-        salida.update(estado=NO_CONCLUYENTE,
+        salida.update(estado=NO_COMPARABLE, clasificacion=None,
                       motivo="precio fuera de escala frente al cotizado (otra unidad o alcance)")
         return salida
+
+    # Precio por pieza: dos piezas solo se comparan si se sabe su tamaño. Si
+    # la referencia trae medidas y la partida no, o difieren, no se compara.
+    u = _plano(unidad or "").replace(".", "").strip()
+    if u in ("pza", "pz", "pzas", "pieza", "piezas", "un", "unidad", "jgo", "lote"):
+        med_ref = extraer_especificaciones(fuente.get("match")).get("sección / medidas")
+        med_cot = extraer_especificaciones(concepto).get("sección / medidas")
+        if med_ref and not med_cot:
+            salida.update(estado=NO_COMPARABLE, clasificacion=None,
+                          motivo=f"precio por pieza: la referencia es de {', '.join(sorted(med_ref))} y la "
+                                 "cotización no declara medidas; pedir dimensiones antes de comparar")
+            return salida
 
     # Regla 2: NO_SEGURO se conserva como orientativa.
     if veredicto == "NO_SEGURO":
@@ -449,50 +465,72 @@ def resultado_final(evaluaciones: dict, precio: float, cantidad) -> dict:
 # ----------------------------------------------------------------------
 # Presentación común (pantalla, CSV y Excel): mismo texto en todos lados.
 # ----------------------------------------------------------------------
-_CLAS_TEXTO = {"ALTO": "caro", "EN MERCADO": "en mercado", "BAJO": "barato"}
+_CLAS_TEXTO = {"ALTO": "caro", "EN MERCADO": "en precio", "BAJO": "barato"}
+
+
+def estado_simple(ev: dict) -> str:
+    """Validada · Orientativa · No comparable · Rechazada · Sin dato."""
+    estado = ev.get("estado")
+    if estado == VALIDADA:
+        return "Validada"
+    if estado in ORIENTATIVAS and ev.get("precio_referencia"):
+        return "Orientativa"
+    if estado == NO_COMPARABLE:
+        return "No comparable"
+    if estado == RECHAZADA:
+        return "Rechazada"
+    return "Sin dato"
 
 
 def dictamen_texto(ev: dict) -> str:
-    """'Validado · caro', 'Orientativo · caro', 'Rechazada', 'Sin referencia'."""
-    estado, clas = ev.get("estado"), _CLAS_TEXTO.get(ev.get("clasificacion") or "", "")
-    if estado == VALIDADA:
-        return f"Validado · {clas}" if clas else "Validado"
-    if estado in ORIENTATIVAS:
-        if "fuera de escala" in str(ev.get("motivo") or ""):
-            return "Fuera de escala"
-        return f"Orientativo · {clas}" if clas else "Orientativo"
-    if estado == RECHAZADA:
-        return "Rechazada"
-    return "Sin referencia"
+    """'Caro' (validada), 'Posiblemente caro' (orientativa), 'No comparable'..."""
+    simple = estado_simple(ev)
+    clas = _CLAS_TEXTO.get(ev.get("clasificacion") or "", "")
+    if simple == "Validada" and clas:
+        return clas[0].upper() + clas[1:]
+    if simple == "Orientativa" and clas:
+        return f"Posiblemente {clas}"
+    return simple
+
+
+def confiabilidad_fuente(ev: dict) -> str:
+    """Qué tan confiable es la FUENTE (no si el concepto es equivalente)."""
+    if not ev.get("precio_referencia") and ev.get("estado") == SIN_DATO:
+        return "—"
+    clave = ev.get("fuente")
+    if clave == "historico":
+        return "Alta (interna Ragasa)"
+    if clave == "nl":
+        return "Alta (oficial, precios contratados)"
+    if clave == "cdmx":
+        return "Alta (oficial, tabulador)"
+    if clave == "ia":
+        url = str(ev.get("url") or "").lower()
+        if ev.get("origen") == "fragmento del buscador":
+            return "Baja (solo fragmento, documento no verificado)"
+        if ".gob.mx" in url or ".gob/" in url:
+            return "Alta (documento oficial)"
+        return "Media (página comercial)" if url else "Baja"
+    return "—"
 
 
 def confiabilidad_texto(ev: dict) -> str:
-    """Confiabilidad del dato. Una referencia no validada nunca sale 'alta'."""
-    if ev.get("estado") in (SIN_DATO, RECHAZADA) or not ev.get("precio_referencia"):
-        return "—"
-    if ev.get("estado") == VALIDADA:
-        return "Alta (validada)"
-    conf = str(ev.get("confianza") or "").upper()
-    if ev.get("fuente") == "ia":
-        return "Media" if conf == "MEDIA" else "Baja"
-    return {"ALTA": "Media", "MEDIA": "Media", "BAJA": "Baja"}.get(conf, "Baja")
+    """Compatibilidad: confiabilidad de la fuente."""
+    return confiabilidad_fuente(ev)
 
 
 def falta_confirmar(ev: dict, concepto: str) -> str:
     """Qué hay que confirmar con el proveedor para validar la referencia."""
-    if ev.get("estado") == VALIDADA:
+    simple = estado_simple(ev)
+    if simple == "Validada":
         return ""
-    if ev.get("estado") == RECHAZADA:
-        return str(ev.get("motivo") or "")
-    if ev.get("estado") == SIN_DATO or not ev.get("descripcion"):
+    if simple in ("Rechazada", "No comparable", "Sin dato") or not ev.get("descripcion"):
         return str(ev.get("motivo") or "sin concepto comparable")
     faltantes, _ = comparar_especificaciones(concepto, ev.get("descripcion"))
     partes = list(faltantes)
     motivo = str(ev.get("motivo") or "")
     if ev.get("estado") == POR_CONFIRMAR:
         partes.append("que sea el mismo concepto (revisión con IA)")
-    if "fuera de escala" in motivo:
-        partes.append("unidad/alcance (precio fuera de escala)")
     if ev.get("fuente") == "ia":
         partes.append("alcance, fecha del precio e IVA de la página")
     elif "meses" in motivo or "fecha del precio no disponible" in motivo:
@@ -500,39 +538,100 @@ def falta_confirmar(ev: dict, concepto: str) -> str:
     return "; ".join(dict.fromkeys(p for p in partes if p)) or motivo
 
 
+def alcance_precio(ev: dict) -> str:
+    """Qué incluye el precio de referencia, según su texto y su tipo de fuente."""
+    t = _plano(ev.get("descripcion") or "")
+    partes = []
+    if "suministro" in t:
+        partes.append("suministro")
+    if re.search(r"colocacion|instalacion|aplicacion|fabricacion|construccion|elaborad", t):
+        partes.append("colocación/instalación")
+    if "mano de obra" in t:
+        partes.append("mano de obra")
+    inc = re.search(r"incluye:?\s*([^.]{0,140})", t)
+    if inc:
+        partes.append("incluye " + inc.group(1).strip())
+    base = {
+        "nl": "precio unitario contratado en obra pública (costo directo + indirectos + utilidad); IVA: confirmar",
+        "cdmx": "precio unitario de tabulador oficial (costo directo + indirectos + utilidad); IVA: confirmar",
+        "historico": "precio cotizado a Ragasa (cotización recibida); IVA según la cotización original",
+        "ia": "precio publicado en la página; alcance e IVA no confirmados",
+    }.get(ev.get("fuente"), "")
+    return "; ".join(x for x in [", ".join(partes) if partes else "", base] if x)
+
+
 def cuenta_filtro(ev: dict) -> bool:
-    """El filtro aporta un dictamen: validado u orientativo, con precio en
-    la misma escala (se excluyen rechazadas, sin dato y fuera de escala)."""
-    return (
-        ev.get("estado") in (VALIDADA,) + ORIENTATIVAS
-        and bool(ev.get("clasificacion"))
-        and "fuera de escala" not in str(ev.get("motivo") or "")
-    )
+    """El filtro aporta un dictamen: validada u orientativa, con precio comparable."""
+    return estado_simple(ev) in ("Validada", "Orientativa") and bool(ev.get("clasificacion"))
 
 
 def resultado_filtros(evaluaciones: dict) -> dict:
     """Lectura simple de los 4 filtros: cuántos dicen caro / en precio /
-    barato. No promedia precios; solo cuenta dictámenes. Si ninguno está
-    validado, el resultado es orientativo ('por validar')."""
+    barato y cuántos están validados. No promedia precios. Sin validadas,
+    el resultado se presenta como 'Posiblemente...' (no es concluyente)."""
     usados = [e for e in evaluaciones.values() if cuenta_filtro(e)]
     conteo = {c: sum(1 for e in usados if e["clasificacion"] == c) for c in (ALTO, EN_MERCADO, BAJO)}
     validados = sum(1 for e in usados if e["estado"] == VALIDADA)
     n = len(usados)
+    detalle = f"{validados} de {n} validada{'s' if n != 1 else ''}" if n else "ningún filtro comparable"
     if not n:
-        return {"clave": None, "texto": "⚪ Sin datos", "detalle": "ningún filtro encontró un precio comparable",
+        return {"clave": None, "texto": "⚪ Sin datos", "texto_plano": "Sin datos", "detalle": detalle,
                 "n": 0, "conteo": conteo, "validados": 0}
     mayor = max(conteo.values())
     ganadores = [c for c, k in conteo.items() if k == mayor]
-    etiqueta = {ALTO: "🔴 Caro", EN_MERCADO: "🟡 En precio", BAJO: "🟢 Barato"}
+    icono = {ALTO: "🔴", EN_MERCADO: "🟡", BAJO: "🟢"}
     if len(ganadores) > 1:
-        partes = [f"{conteo[c]} {palabra}" for c, palabra in
-                  ((ALTO, "caro"), (EN_MERCADO, "en precio"), (BAJO, "barato")) if conteo[c]]
-        clave, texto = "MIXTO", "🟠 No coinciden: " + ", ".join(partes)
+        partes = [f"{conteo[c]} {_CLAS_TEXTO[c]}" for c in (ALTO, EN_MERCADO, BAJO) if conteo[c]]
+        clave, plano = MIXTO, "No coinciden: " + ", ".join(partes)
+        texto = "🟠 " + plano
     else:
         clave = ganadores[0]
-        texto = f"{etiqueta[clave]} en {mayor} de {n} filtro{'s' if n > 1 else ''}"
+        palabra = _CLAS_TEXTO[clave]
+        palabra = palabra[0].upper() + palabra[1:] if validados else f"Posiblemente {palabra}"
+        plano = f"{palabra} en {mayor} de {n} filtro{'s' if n > 1 else ''}"
+        texto = f"{icono[clave]} {plano}"
+    return {"clave": clave, "texto": texto, "texto_plano": plano, "detalle": detalle,
+            "n": n, "conteo": conteo, "validados": validados}
+
+
+def evidencia(ev: dict, concepto: str) -> dict:
+    """Campos de evidencia en el mismo orden para pantalla, CSV y Excel."""
+    inf = ev.get("inflacion") or {}
+    verificacion = ""
+    if ev.get("fuente") == "ia" and ev.get("precio_referencia"):
+        verificacion = ("solo fragmento del buscador (documento completo no verificado)"
+                        if ev.get("origen") == "fragmento del buscador"
+                        else "precio leído en el documento completo")
+    elif ev.get("precio_referencia"):
+        verificacion = "base de datos cargada en la app"
     return {
-        "clave": clave, "texto": texto,
-        "detalle": "validado" if validados else "orientativo · por validar",
-        "n": n, "conteo": conteo, "validados": validados,
+        "Estado": estado_simple(ev),
+        "Motivo": ev.get("motivo") or "",
+        "Dictamen": dictamen_texto(ev),
+        "Confiabilidad de la fuente": confiabilidad_fuente(ev),
+        "Falta confirmar": falta_confirmar(ev, concepto),
+        "Descripción completa de la referencia": ev.get("descripcion") or "",
+        "Unidad de la referencia": ev.get("unidad_ref") or "",
+        "Qué incluye el precio": alcance_precio(ev) if ev.get("descripcion") else "",
+        "Documento / fuente": ev.get("documento") or "",
+        "Enlace": ev.get("url") or "",
+        "Código": ev.get("codigo") or "",
+        "Página": ev.get("pagina") or "",
+        "Región": ev.get("region") or "",
+        "Fecha / periodo del precio": ev.get("periodo") or ev.get("fecha") or (
+            "no indicada" if ev.get("precio_referencia") else ""),
+        "Fecha de consulta": ev.get("fecha_consulta") or "",
+        "Verificación": verificacion,
+        "Precio original": ev.get("precio_original"),
+        "Índice de inflación": inf.get("indice", ""),
+        "Periodo base": inf.get("periodo_base", ""),
+        "Valor base": inf.get("valor_base"),
+        "Periodo final": inf.get("periodo_final", ""),
+        "Valor final": inf.get("valor_final"),
+        "Factor": inf.get("factor"),
+        "Precio usado (actualizado)": ev.get("precio_referencia"),
+        "Nota de inflación": ("el ajuste por inflación no confirma vigencia comercial ni equivalencia técnica"
+                              if inf else ""),
+        "Revisión IA": ev.get("revision_ia") or "",
+        "Evidencia (frase)": ev.get("evidencia") or "",
     }

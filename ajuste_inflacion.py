@@ -216,3 +216,20 @@ def ajustar_precio(precio: float, anio) -> float:
         return round(float(precio) * factor_ajuste(anio), 2)
     except (TypeError, ValueError):
         return None
+
+
+def detalle_ajuste(anio) -> dict:
+    """Datos para reproducir el ajuste: índice, periodos, valores y factor.
+    El ajuste por inflación NO confirma vigencia comercial ni equivalencia."""
+    a = _anio_valido(anio)
+    disponibles = sorted(INPC_NIVEL_DICIEMBRE)
+    a_usado = min(max(a, disponibles[0]), disponibles[-1])
+    base = INPC_NIVEL_DICIEMBRE[a_usado]
+    return {
+        "indice": "INPC general, INEGI (base 2a quincena julio 2018 = 100)",
+        "periodo_base": f"diciembre {a_usado}",
+        "valor_base": base,
+        "periodo_final": ETIQUETA_ACTUAL,
+        "valor_final": NIVEL_ACTUAL,
+        "factor": round(NIVEL_ACTUAL / base, 4),
+    }

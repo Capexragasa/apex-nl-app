@@ -45,6 +45,7 @@ GRIS_F, GRIS_T = "#E4E7EB", "#475467"
 ESTADO_COLOR = {
     v.VALIDADA: VERDE_T, v.RECHAZADA: "#B42318",
     v.NO_CONCLUYENTE: "#8A6100", v.POR_CONFIRMAR: "#667085", v.SIN_DATO: "#98A2B3",
+    v.EQUIVALENCIA_PARCIAL: "#8A6100", v.NO_COMPARABLE: "#98A2B3",
 }
 
 
@@ -131,7 +132,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             return f_ref.get(ev.get("clasificacion") or "", f_mon)
         if estado in v.ORIENTATIVAS:
             return f_ref.get("O_" + (ev.get("clasificacion") or ""), f_ref["ORIENTATIVA"])
-        if estado == v.RECHAZADA:
+        if estado in (v.RECHAZADA, v.NO_COMPARABLE):
             return f_ref["RECHAZADA"]
         return f_mon
 
@@ -157,10 +158,10 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # respaldo y ahorro se recalculan con fórmulas a partir de ellos.
     ws = wb.add_worksheet("Resumen")
     cab_ini = ["#", "Concepto", "Unidad", "Cantidad", "P.U. cotizado", "Importe cotizado"]
-    sub_fuente = ["P.U. ref.", "Diferencia $/u", "% vs ref.", "Dictamen", "Confiabilidad"]
+    sub_fuente = ["P.U. ref.", "Diferencia $/u", "% vs ref.", "Dictamen", "Confiab. fuente"]
     NF = len(sub_fuente)
     cab_fin = ["Resultado de los 4 filtros", "Referencia", "Respaldo", "P.U. de referencia",
-               "% vs referencia", "Diferencia contra referencia", "Ahorro respaldado", "Nota"]
+               "% vs referencia", "Diferencia contra referencia", "Oportunidad validada (potencial)", "Nota"]
     n_cols = len(cab_ini) + NF * len(FUENTES) + len(cab_fin)
     ws.merge_range(0, 0, 0, n_cols - 1, "Revisión de cotización CAPEX", f_titulo)
     ws.set_row(0, 26)
@@ -213,9 +214,9 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             col = lambda k: xl_col_to_name(c0 + k)
             ws.write_formula(r, c0, f'=IF({pf(0)}="","",{pf(0)})',
                              estilo_ref(ev) if ref is not None else f_mon, ref if ref is not None else "")
-            excluida = estado in (v.RECHAZADA, v.SIN_DATO)
+            excluida = estado in (v.RECHAZADA, v.SIN_DATO, v.NO_COMPARABLE)
             ws.write_formula(
-                r, c0 + 1, f'=IF(OR({col(0)}{R}="",{pf(1)}="RECHAZADA",{pf(1)}="SIN DATO"),"",E{R}-{col(0)}{R})',
+                r, c0 + 1, f'=IF(OR({col(0)}{R}="",{pf(1)}="RECHAZADA",{pf(1)}="SIN DATO",{pf(1)}="NO COMPARABLE"),"",E{R}-{col(0)}{R})',
                 f_dif_mon, (precio - ref) if (ref and precio is not None and not excluida) else "")
             ws.write_formula(
                 r, c0 + 2, f'=IF({col(1)}{R}="","",E{R}/{col(0)}{R}-1)',
@@ -237,23 +238,26 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             primera = f"IF({x},{c},{primera})"
         iguales = ",".join(f"OR(NOT({x}),{c}={primera})" for x, c in zip(es_val, clase))
         nc = "+".join(f'(RIGHT({d},4)="caro")' for d in celdas_dict)
-        ne = "+".join(f'(RIGHT({d},10)="en mercado")' for d in celdas_dict)
+        ne = "+".join(f'(RIGHT({d},9)="en precio")' for d in celdas_dict)
         nb = "+".join(f'(RIGHT({d},6)="barato")' for d in celdas_dict)
         nt = f"(({nc})+({ne})+({nb}))"
+        nv = "+".join(f'({e}="VALIDADA")' for e in celdas_est)
         sufijo = f'&" de "&{nt}&IF({nt}>1," filtros"," filtro")'
+        def _pal(p):
+            return f'IF(({nv})>0,"{p[0].upper() + p[1:]}","Posiblemente {p}")'
         f_res = (f'=IF({nt}=0,"Sin datos",'
-                 f'IF(AND(({nc})>({ne}),({nc})>({nb})),"Caro en "&({nc}){sufijo},'
-                 f'IF(AND(({ne})>({nc}),({ne})>({nb})),"En precio en "&({ne}){sufijo},'
-                 f'IF(AND(({nb})>({nc}),({nb})>({ne})),"Barato en "&({nb}){sufijo},'
+                 f'IF(AND(({nc})>({ne}),({nc})>({nb})),{_pal("caro")}&" en "&({nc}){sufijo},'
+                 f'IF(AND(({ne})>({nc}),({ne})>({nb})),{_pal("en precio")}&" en "&({ne}){sufijo},'
+                 f'IF(AND(({nb})>({nc}),({nb})>({ne})),{_pal("barato")}&" en "&({nb}){sufijo},'
                  f'"No coinciden: "&MID(IF(({nc})>0,", "&({nc})&" caro","")&IF(({ne})>0,", "&({ne})&" en precio","")'
                  f'&IF(({nb})>0,", "&({nb})&" barato",""),3,100)))))')
         rf = v.resultado_filtros(evs)
-        texto_rf = rf["texto"].split(" ", 1)[1] if rf["clave"] else "Sin datos"
+        texto_rf = rf["texto_plano"]
         ws.write_formula(r, c_fin, f_res, f_semaforo.get(rf["clave"] or "OTRO", f_semaforo["OTRO"]), texto_rf)
-        for palabra, color_f, color_t in (("Caro", ROJO_F, ROJO_T), ("Barato", VERDE_F, VERDE_T),
-                                          ("En precio", AMBAR_F, AMBAR_T)):
+        for palabra, color_f, color_t in (("caro", ROJO_F, ROJO_T), ("barato", VERDE_F, VERDE_T),
+                                          ("en precio", AMBAR_F, AMBAR_T)):
             ws.conditional_format(f"{xl_col_to_name(c_fin)}{R}", {
-                "type": "text", "criteria": "begins with", "value": palabra,
+                "type": "text", "criteria": "containing", "value": palabra + " en ",
                 "format": wb.add_format({"bg_color": color_f, "font_color": color_t, "bold": True})})
 
         nombres = [v.NOMBRE_FUENTE[k] for k in FUENTES]
@@ -297,7 +301,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     ws.write_formula(ultima, 5, f"=SUM(F{fila0 + 1}:F{U})", f_mon_neg, total_importe)
     col_ah = xl_col_to_name(c_fin + 6)
     ws.write_formula(ultima, c_fin + 6, f"=SUM({col_ah}{fila0 + 1}:{col_ah}{U})", f_mon_neg, total_ahorro)
-    ws.write(ultima + 1, 1, "Ahorro respaldado sobre el importe", f_bold)
+    ws.write(ultima + 1, 1, "Oportunidad validada sobre el importe", f_bold)
     ws.write_formula(ultima + 1, c_fin + 6, f'=IF(F{U + 1}=0,"",{col_ah}{U + 1}/F{U + 1})', f_pct_b,
                      (total_ahorro / total_importe) if total_importe else "")
 
@@ -479,7 +483,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     for clave in FUENTES:
         n = NOMBRE_CORTO[clave]
         cab_f += [f"{n}\nP.U. ref.", f"{n}\nestado", f"{n}\n% vs ref.", f"{n}\ndictamen",
-                  f"{n}\nconfiabilidad", f"{n}\nfalta confirmar"]
+                  f"{n}\nconfiabilidad fuente", f"{n}\nfalta confirmar"]
     wf.merge_range(0, 0, 0, len(cab_f) - 1, "Comparación independiente por fuente", f_titulo)
     wf.set_row(0, 26)
     wf.write(1, 0, "Azul = captura. Cambia aquí el P.U. de referencia o el estado (VALIDADA, EQUIVALENCIA PARCIAL, "
@@ -512,26 +516,21 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
             wf.data_validation(r, c0 + 1, r, c0 + 1, {
                 "validate": "list",
                 "source": [v.VALIDADA, v.EQUIVALENCIA_PARCIAL, v.NO_CONCLUYENTE, v.POR_CONFIRMAR,
-                           v.RECHAZADA, v.SIN_DATO],
+                           v.NO_COMPARABLE, v.RECHAZADA, v.SIN_DATO],
             })
             pct = (precio / ref - 1) if (ref and precio is not None
-                                        and estado not in (v.RECHAZADA, v.SIN_DATO)) else ""
+                                        and estado not in (v.RECHAZADA, v.SIN_DATO, v.NO_COMPARABLE)) else ""
             wf.write_formula(r, c0 + 2,
-                             f'=IF(OR({cr}{R}="",{ce}{R}="RECHAZADA",{ce}{R}="SIN DATO"),"",D{R}/{cr}{R}-1)',
+                             f'=IF(OR({cr}{R}="",{ce}{R}="RECHAZADA",{ce}{R}="SIN DATO",{ce}{R}="NO COMPARABLE"),"",D{R}/{cr}{R}-1)',
                              f_pct, pct)
-            clas = f'IF(D{R}>{cr}{R}*1.05,"caro",IF(D{R}<{cr}{R}*0.95,"barato","en mercado"))'
+            clas = f'IF(D{R}>{cr}{R}*1.05,"caro",IF(D{R}<{cr}{R}*0.95,"barato","en precio"))'
+            clas_v = f'IF(D{R}>{cr}{R}*1.05,"Caro",IF(D{R}<{cr}{R}*0.95,"Barato","En precio"))'
             wf.write_formula(
                 r, c0 + 3,
-                f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin referencia",IF({ce}{R}="RECHAZADA","Rechazada",'
-                f'IF(AND({ce}{R}<>"VALIDADA",OR({cr}{R}>D{R}*{v.FACTOR_ESCALA:g},{cr}{R}<D{R}/{v.FACTOR_ESCALA:g})),'
-                f'"Fuera de escala",IF({ce}{R}="VALIDADA","Validado · ","Orientativo · ")&{clas})))',
+                f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO"),"Sin dato",IF({ce}{R}="RECHAZADA","Rechazada",'
+                f'IF({ce}{R}="NO COMPARABLE","No comparable",IF({ce}{R}="VALIDADA",{clas_v},"Posiblemente "&{clas}))))',
                 f_centro, v.dictamen_texto(ev))
-            conf_orient = v.confiabilidad_texto(dict(ev, estado=v.NO_CONCLUYENTE)) if ref is not None else "—"
-            wf.write_formula(
-                r, c0 + 4,
-                f'=IF(OR({cr}{R}="",{ce}{R}="SIN DATO",{ce}{R}="RECHAZADA"),"—",'
-                f'IF({ce}{R}="VALIDADA","Alta (validada)","{conf_orient}"))',
-                f_centro, v.confiabilidad_texto(ev))
+            wf.write(r, c0 + 4, v.confiabilidad_fuente(ev), f_centro)
             wf.write(r, c0 + 5, v.falta_confirmar(ev, f.get("Concepto")), f_txt)
     anchos_f = [5, 44, 8, 13] + [12, 15, 10, 20, 13, 34] * len(FUENTES)
     for c, ancho in enumerate(anchos_f):
@@ -545,43 +544,45 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
     # Hoja 3: Evidencia
     # ==================================================================
     we = wb.add_worksheet("Evidencia")
-    cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "Estado", "Observaciones (motivo)",
-             "Concepto encontrado en la fuente", "Confianza texto", "P.U. referencia",
-             "Revisión IA", "Evidencia web (frase o URL)", "Dictamen", "Confiabilidad",
-             "Falta confirmar", "Fecha del precio", "Fecha de consulta"]
+    campos = list(v.evidencia({}, "").keys())
+    cab_e = ["#", "Concepto cotizado", "Unidad", "Fuente", "P.U. referencia"] + campos
     we.merge_range(0, 0, 0, len(cab_e) - 1, "Evidencia de cada referencia", f_titulo)
     we.set_row(0, 26)
-    we.write(1, 0, "Por qué cada referencia quedó VALIDADA, NO CONCLUYENTE, POR CONFIRMAR, "
-                   "RECHAZADA o SIN DATO.", f_sub)
+    we.write(1, 0, "Documento, código, página, unidad, región, fechas, qué incluye el precio y ajuste por inflación "
+                   "(precio original, índice, periodos, valores y factor). El ajuste por inflación no confirma "
+                   "vigencia comercial ni equivalencia técnica.", f_sub)
     for c, texto in enumerate(cab_e):
         we.write(3, c, texto, f_cab)
+    we.set_row(3, 30)
+    f_factor, f_indice = fmt(num_format="0.0000"), fmt(num_format="0.000")
+    numericos = {"Precio original", "Precio usado (actualizado)", "Valor base", "Valor final", "Factor"}
     r = 4
     for f in filas:
         for clave in FUENTES:
             ev = (f.get("_evaluaciones") or {}).get(clave) or {}
-            estado = ev.get("estado", v.SIN_DATO)
             we.write(r, 0, f.get("Partida"), f_centro)
             we.write(r, 1, f.get("Concepto"), f_txt)
             we.write(r, 2, f.get("Unidad"), f_centro)
             we.write(r, 3, v.NOMBRE_FUENTE[clave], f_txt)
-            we.write(r, 4, estado, f_estado.get(estado, f_centro))
-            we.write(r, 5, ev.get("motivo") or "", f_txt)
-            we.write(r, 6, ev.get("descripcion") or "", f_txt)
-            we.write(r, 7, ev.get("confianza") or "", f_centro)
             ref = _num(ev.get("precio_referencia"))
             if ref is not None:
-                we.write_number(r, 8, ref, f_mon)
+                we.write_number(r, 4, ref, f_mon)
             else:
-                we.write_blank(r, 8, None, f_mon)
-            we.write(r, 9, ev.get("revision_ia") or "", f_txt)
-            we.write(r, 10, " · ".join(x for x in (ev.get("fuente_web"), ev.get("evidencia")) if x), f_txt)
-            we.write(r, 11, v.dictamen_texto(ev), f_centro)
-            we.write(r, 12, v.confiabilidad_texto(ev), f_centro)
-            we.write(r, 13, v.falta_confirmar(ev, f.get("Concepto")), f_txt)
-            we.write(r, 14, ev.get("fecha") or ("no indicada" if estado != v.SIN_DATO else ""), f_centro)
-            we.write(r, 15, ev.get("fecha_consulta") or "", f_centro)
+                we.write_blank(r, 4, None, f_mon)
+            for k, (campo, valor) in enumerate(v.evidencia(ev, f.get("Concepto")).items()):
+                c = 5 + k
+                num = _num(valor) if campo in numericos else None
+                if num is not None:
+                    we.write_number(r, c, num, f_factor if campo == "Factor" else
+                                    (f_indice if campo.startswith("Valor") else f_mon))
+                elif campo == "Enlace" and valor:
+                    we.write_url(r, c, str(valor)[:255], string=str(valor)[:255])
+                else:
+                    we.write(r, c, "" if valor is None else str(valor), f_txt)
             r += 1
-    for c, ancho in enumerate([5, 38, 8, 16, 16, 44, 50, 11, 14, 44, 50, 20, 14, 40, 14, 14]):
+    anchos_e = [5, 34, 8, 14, 13] + [14, 40, 18, 22, 36, 44, 10, 36, 34, 30, 10, 8, 12, 18, 13, 26, 14, 10, 14,
+                                     10, 10, 13, 30, 40, 44]
+    for c, ancho in enumerate(anchos_e[:len(cab_e)]):
         we.set_column(c, c, ancho)
     we.freeze_panes(4, 4)
     we.hide_gridlines(2)
@@ -606,7 +607,7 @@ def generar_excel(filas: list[dict], proveedor: str = "", proyecto: str = "",
                                  "El ajuste por INPC actualiza la inflación pero no demuestra vigencia."),
         ("Material / especificación distinta", "Se RECHAZA aunque no haya IA (p. ej. columnas metálicas vs. castillos de concreto)."),
         ("Sin confirmar", "Sin CONFIRMA de la IA la referencia queda POR CONFIRMAR (orientativa)."),
-        ("Diferencia vs. ahorro", "Contra una referencia VALIDADA la diferencia es ahorro respaldado; contra una orientativa es "
+        ("Diferencia vs. ahorro", "Contra una referencia VALIDADA la diferencia es una oportunidad potencial (el ahorro real es lo que se negocie); contra una orientativa es "
                                   "'diferencia contra referencia, pendiente de validar'."),
         ("Precio web", "Gemini con Google Search; si no hay cuota, el respaldo busca cada partida por material, trabajo y "
                        "unidad, abre las páginas y toma el precio solo del renglón donde aparecen juntos el concepto, la "

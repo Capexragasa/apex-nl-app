@@ -2300,6 +2300,7 @@ if archivo is not None:
                             unidad,
                             precio,
                             usar_ia=usar_ia,
+                            excluir=(proveedor, proyecto),
                         )
 
                     fila_registros.append(
@@ -2505,7 +2506,11 @@ if archivo is not None:
                         resultados_busqueda_mercado.update(respuesta_lote)
                         for item in lote:
                             respuesta = respuesta_lote.get(item["id"])
-                            if respuesta and respuesta.get("tiene_dato") and respuesta.get("precio_mxn"):
+                            # Se reutiliza en la sesión tanto un precio encontrado como un
+                            # "no localizado" (no se repite la búsqueda); un fallo del
+                            # buscador o de cuota sí se vuelve a intentar.
+                            if respuesta and ((respuesta.get("tiene_dato") and respuesta.get("precio_mxn"))
+                                              or "Sin precio comprobable" in str(respuesta.get("nota") or "")):
                                 clave = ("fuente-verificada-v7", item["descripcion"].casefold().strip(), item["unidad"].casefold().strip())
                                 cache_precios_ia[clave] = respuesta
 
@@ -2944,26 +2949,26 @@ if archivo is not None:
                     _es_gemini = bool(busqueda_ia) and str(busqueda_ia.get("motor", "")).startswith("Gemini")
                     evaluaciones = {
                         "historico": validacion.evaluar_fuente(
-                            "historico", consulta_historico, concepto=concepto, precio=precio,
+                            "historico", consulta_historico, concepto=concepto, precio=precio, unidad=unidad,
                             usar_ia=usar_ia,
                             precio_referencia=(consulta_historico or {}).get("precio_mediana"),
                             fecha_dato=(consulta_historico or {}).get("fecha_dato"),
                             region="RAGASA",
                         ),
                         "nl": validacion.evaluar_fuente(
-                            "nl", nl, concepto=concepto, precio=precio, usar_ia=usar_ia,
+                            "nl", nl, concepto=concepto, precio=precio, usar_ia=usar_ia, unidad=unidad,
                             precio_referencia=nl.get("precio_mediana_ajustada"),
                             fecha_dato=nl.get("anio_dato_mas_reciente"),
                             region="NL",
                         ),
                         "cdmx": validacion.evaluar_fuente(
-                            "cdmx", cdmx, concepto=concepto, precio=precio, usar_ia=usar_ia,
+                            "cdmx", cdmx, concepto=concepto, precio=precio, usar_ia=usar_ia, unidad=unidad,
                             precio_referencia=cdmx.get("precio_referencia"),
                             fecha_dato=FECHA_TABULADOR_CDMX,
                             region="CDMX",
                         ),
                         "ia": validacion.evaluar_fuente(
-                            "ia", _pseudo_ia, concepto=concepto, precio=precio, usar_ia=False,
+                            "ia", _pseudo_ia, concepto=concepto, precio=precio, usar_ia=False, unidad=unidad,
                             precio_referencia=convertir_numero((busqueda_ia or {}).get("precio_mxn"))
                             if _pseudo_ia and _pseudo_ia.get("match") else None,
                             # La página web casi nunca dice de cuándo es el
@@ -2976,6 +2981,39 @@ if archivo is not None:
                             web_verificada=_es_gemini and bool((busqueda_ia or {}).get("verificado")),
                         ),
                     }
+                    # Evidencia verificable de cada referencia (documento, código,
+                    # página, unidad, región, fechas, ajuste por inflación).
+                    _ev_hist = evaluaciones["historico"]
+                    _ev_hist.update({
+                        "documento": "Histórico interno Ragasa (Google Sheets)" if historico is not None else "",
+                        "unidad_ref": unidad, "region": "Ragasa",
+                        "proveedores_ref": ", ".join((consulta_historico or {}).get("proveedores") or []),
+                    })
+                    if historico is None:
+                        _ev_hist["motivo"] = "histórico no conectado"
+                    elif _ev_hist["estado"] == validacion.SIN_DATO:
+                        _ev_hist["motivo"] = "conectado, sin coincidencias: " + str(_ev_hist.get("motivo") or "")
+                    _anio_nl = nl.get("anio_dato_mas_reciente")
+                    evaluaciones["nl"].update({
+                        "documento": "Base_Precios_Unitarios_NL_CDMX.xlsx · hoja 'Tabulador Homologado NL' (licitaciones SIASI)",
+                        "unidad_ref": nl.get("unidad"), "region": "Nuevo León",
+                        "precio_original": nl.get("precio_mediana"),
+                        "registros": nl.get("n_registros"),
+                        "periodo": (f"{str(nl.get('fecha_min'))[:7]} a {str(nl.get('fecha_max'))[:7]}"
+                                    if nl.get("fecha_min") else None),
+                        "inflacion": ajuste_inflacion.detalle_ajuste(_anio_nl) if (_anio_nl and ajustar_inflacion) else None,
+                    })
+                    evaluaciones["cdmx"].update({
+                        "documento": "Tabulador General de Precios Unitarios CDMX 2026",
+                        "codigo": cdmx.get("clave"), "pagina": cdmx.get("pagina"),
+                        "unidad_ref": cdmx.get("unidad"), "region": "CDMX",
+                    })
+                    if busqueda_ia:
+                        evaluaciones["ia"].update({
+                            "url": busqueda_ia.get("fuente_url"), "origen": busqueda_ia.get("origen"),
+                            "documento": busqueda_ia.get("fuente_nombre"), "unidad_ref": busqueda_ia.get("unidad_encontrada"),
+                            "region": busqueda_ia.get("region") or "México (web)",
+                        })
                     if evaluaciones["ia"]["estado"] != validacion.SIN_DATO and busqueda_ia:
                         # Concepto encontrado y fuente (sitio + URL) por separado.
                         evaluaciones["ia"]["fuente_web"] = " · ".join(
@@ -3154,7 +3192,7 @@ if archivo is not None:
                 m3.metric(
                     "Partidas caras según los filtros", f"{_n_caras} de {len(filas)}",
                     help=(f"Diferencia contra la referencia: ${_monto_caro:,.0f}. "
-                          f"Ahorro respaldado (solo referencias validadas): ${_ahorro_respaldado:,.0f}."),
+                          f"Oportunidad contra referencias validadas: ${_ahorro_respaldado:,.0f} (potencial; el ahorro real es el que se negocie)."),
                 )
 
                 # Aviso de IA en una línea.
@@ -3192,26 +3230,44 @@ if archivo is not None:
                     (False, "EN MERCADO"): ("#fff6d6", "#7a5d00"),
                 }
 
+                def _motivo_corto(ev):
+                    m = _html.escape(str(ev.get("motivo") or ""), quote=False)
+                    pm = m.lower()
+                    if "no conectado" in pm:
+                        return "no conectado"
+                    if "cuota" in pm or "429" in pm:
+                        return "sin cuota de la IA"
+                    if "no se pudo consultar" in pm or "error" in pm:
+                        return "falló el buscador"
+                    if "conectado, sin coincidencias" in pm:
+                        return "conectado, sin coincidencias"
+                    if "desactivada" in pm:
+                        return "búsqueda desactivada"
+                    return "no se localizó referencia"
+
                 def _celda_fuente(ev, concepto):
                     def e(x):
                         return _html.escape(str(x), quote=False)
-                    motivo = e(str(ev.get("motivo") or "")[:140])
-                    if ev["estado"] == validacion.RECHAZADA:
-                        return ("color:#98a2b3", f'<span title="{motivo}">No aplica<br><small>{motivo[:70]}</small></span>')
-                    if ev["estado"] == validacion.SIN_DATO or not ev.get("precio_referencia") or not validacion.cuenta_filtro(ev):
-                        return ("color:#98a2b3", f'<span title="{motivo}">Sin dato</span>')
-                    validada = ev["estado"] == validacion.VALIDADA
+                    simple = validacion.estado_simple(ev)
+                    motivo = e(str(ev.get("motivo") or "")[:160])
+                    if simple in ("Rechazada", "No comparable"):
+                        precio_txt = f"<s>{_dinero(ev['precio_referencia'])}</s> · " if ev.get("precio_referencia") else ""
+                        return ("color:#98a2b3", f'<span title="{motivo}">{precio_txt}{simple}<br>'
+                                                 f'<small>{motivo[:90]}</small></span>')
+                    if simple == "Sin dato":
+                        return ("color:#98a2b3", f'<span title="{motivo}">Sin dato<br><small>{_motivo_corto(ev)}</small></span>')
+                    validada = simple == "Validada"
                     fondo, texto = _COLOR_CELDA.get((validada, ev.get("clasificacion")), ("#f2f4f7", "#344054"))
-                    palabra = {"ALTO": "🔴 Caro", "EN MERCADO": "🟡 En precio", "BAJO": "🟢 Barato"}[ev["clasificacion"]]
+                    icono = {"ALTO": "🔴", "EN MERCADO": "🟡", "BAJO": "🟢"}[ev["clasificacion"]]
                     pct = ev.get("diferencia_pct")
                     dif = ev.get("diferencia_unitaria")
                     estilo = f"background:{fondo};color:{texto}" + (";font-weight:600" if validada else "")
                     return (estilo,
                             f"<b>{_dinero(ev['precio_referencia'])}</b><br>"
-                            f"{palabra} {pct:+.0f}%<br>"
+                            f"{icono} {e(validacion.dictamen_texto(ev))} {pct:+.1f}%<br>"
                             f"<small>{'+' if dif >= 0 else '-'}${abs(dif):,.2f} por unidad<br>"
-                            f"{'✔ validado' if validada else 'orientativo'} · confiabilidad "
-                            f"{e(validacion.confiabilidad_texto(ev).split(' ')[0].lower())}</small>")
+                            f"{simple}{'' if validada else ' · falta confirmar'}<br>"
+                            f"Fuente: {e(validacion.confiabilidad_fuente(ev).split(' (')[0].lower())}</small>")
 
                 st.markdown("**Los 4 filtros por partida**")
                 _cab = "".join(f"<th>{n}</th>" for n in ("Concepto", "Cantidad", "Precio cotizado")) + "".join(
@@ -3219,7 +3275,7 @@ if archivo is not None:
                 _filas_html = []
                 for f in filas:
                     _tds = [
-                        f"<td>{_html.escape(str(f.get('Concepto'))[:90])}</td>",
+                        f"<td>{_html.escape(str(f.get('Concepto'))[:90], quote=False)}</td>",
                         f"<td>{convertir_numero(f.get('Cantidad')) or 0:g} {_html.escape(str(f.get('Unidad')))}</td>",
                         f"<td><b>{_dinero(f.get('Precio cotizado'))}</b></td>",
                     ]
@@ -3230,7 +3286,8 @@ if archivo is not None:
                     _fondo_r = {"ALTO": "#fde4e4", "BAJO": "#e3f4e7", "EN MERCADO": "#fff6d6",
                                 "MIXTO": "#fdebd3"}.get(_rf["clave"], "#f2f4f7")
                     _tds.append(f'<td style="background:{_fondo_r};font-weight:600">{_rf["texto"]}'
-                                f'<br><small style="font-weight:400">{_rf["detalle"]}</small></td>')
+                                f'<br><small style="font-weight:400">{_rf["detalle"]}'
+                                f'{"" if _rf["validados"] or not _rf["n"] else " · no concluyente"}</small></td>')
                     _filas_html.append("<tr>" + "".join(_tds) + "</tr>")
                 st.markdown(
                     "<style>.cmp{width:100%;border-collapse:collapse;font-size:0.82rem}"
@@ -3240,9 +3297,10 @@ if archivo is not None:
                     f'<div style="overflow-x:auto"><table class="cmp"><tr>{_cab}</tr>{"".join(_filas_html)}</table></div>',
                     unsafe_allow_html=True,
                 )
-                st.caption("Cada filtro compara tu precio por separado contra su referencia: 🔴 caro (más de 5 % arriba) · "
-                           "🟡 en precio (±5 %) · 🟢 barato. Orientativo = precio real de un concepto parecido; falta "
-                           "confirmar la especificación (ver «Ver detalle»). Resultado = cuántos filtros coinciden; no promedia precios.")
+                st.caption("Cada filtro compara tu precio por separado: 🔴 caro (más de 5 % arriba) · 🟡 en precio (±5 %, "
+                           "criterio operativo de la app) · 🟢 barato · gris = no se puede comparar. «Posiblemente» = "
+                           "referencia orientativa (concepto parecido; falta confirmar especificación). Resultado = cuántos "
+                           "filtros coinciden y cuántos están validados; no promedia precios.")
 
                 # ---------------- 3. Acción principal ----------------
                 def _nombre_corto(concepto):
@@ -3264,12 +3322,22 @@ if archivo is not None:
                                 _pedir_espec.append(_nombre_corto(a["concepto"]))
                 for f in filas:
                     for clave in ("nl", "cdmx", "historico"):
-                        if "el proveedor no declara" in (f["_evaluaciones"][clave].get("motivo") or ""):
+                        if ("el proveedor no declara" in (f["_evaluaciones"][clave].get("motivo") or "")
+                                or "no declara medidas" in (f["_evaluaciones"][clave].get("motivo") or "")):
                             _pedir_espec.append(_nombre_corto(f.get("Concepto")))
                             break
                 _caras = [_nombre_corto(f.get("Concepto")) for f in filas
                           if f["_final"].get("respaldo") == "VALIDADA" and f["_final"]["semaforo"] == "ALTO"]
                 _partes = []
+                _errores_arit = [a for a in revision_cant["aritmetica"] if not a["ok"]]
+                if _errores_arit:
+                    _partes.append("corregir importes de " + ", ".join(
+                        f"partida {a['partida']} ({'+' if a['diferencia'] >= 0 else '-'}${abs(a['diferencia']):,.2f})"
+                        for a in _errores_arit))
+                elif not revision_cant["total_ok"] and revision_cant.get("total_declarado"):
+                    _partes.append(
+                        f"aclarar el total: declarado ${revision_cant['total_declarado']:,.2f} vs calculado "
+                        f"${revision_cant['total_calculado']:,.2f}")
                 if _pedir_generador:
                     _partes.append("solicitar " + " y ".join(dict.fromkeys(_pedir_generador)))
                 _espec = [e for e in dict.fromkeys(_pedir_espec)]
@@ -3330,17 +3398,9 @@ if archivo is not None:
                                 round(ev["diferencia_unitaria"] * cant, 2)
                                 if ev.get("diferencia_unitaria") is not None and cant else None
                             ),
-                            f"{nombre} · dictamen": validacion.dictamen_texto(ev),
-                            f"{nombre} · confiabilidad": validacion.confiabilidad_texto(ev),
-                            f"{nombre} · falta confirmar": validacion.falta_confirmar(ev, f.get("Concepto")),
-                            f"{nombre} · estado": ev["estado"],
-                            f"{nombre} · descripción encontrada": ev.get("descripcion") or "",
-                            f"{nombre} · fuente": fuente_txt,
-                            f"{nombre} · fecha del precio": ev.get("fecha") or ("no indicada" if ev["estado"] != validacion.SIN_DATO else ""),
-                            f"{nombre} · fecha de consulta": ev.get("fecha_consulta") or "",
-                            f"{nombre} · observaciones": ev.get("motivo") or "",
-                            f"{nombre} · revisión IA": ev.get("revision_ia") or "",
                         })
+                        fila_csv.update({f"{nombre} · {k}": val for k, val in
+                                         validacion.evidencia(ev, f.get("Concepto")).items()})
                     _mdo = resumen_mdo.get(str(f.get("Partida")), {})
                     fila_csv.update({
                         "Mercado · referencias": _mdo.get("referencias"),
@@ -3354,14 +3414,13 @@ if archivo is not None:
                         "Mercado CDMX · concepto": _mdo.get("cdmx_concepto"),
                         "Mercado CDMX · precio": _mdo.get("cdmx_precio"),
                         "Mercado · posición": _mdo.get("posicion"),
-                        "Resultado de los 4 filtros": (f["_filtros"]["texto"].split(" ", 1)[1]
-                                                       if f["_filtros"]["clave"] else "Sin datos"),
-                        "Validado / orientativo": f["_filtros"]["detalle"],
+                        "Resultado de los 4 filtros": f["_filtros"]["texto_plano"],
+                        "Referencias validadas": f["_filtros"]["detalle"],
                         "Referencia": fin_["referencia_negociacion"] or "",
                         "Respaldo": fin_["respaldo"] or "",
                         "% vs referencia": fin_["diferencia_pct"],
                         "Diferencia contra referencia": fin_["diferencia_importe"],
-                        "Ahorro respaldado": fin_["ahorro_potencial"] or 0.0,
+                        "Oportunidad validada (potencial)": fin_["ahorro_potencial"] or 0.0,
                         "Nota": fin_["detalle"] or "",
                         "Configuración": configuracion_ia,
                     })
@@ -3372,16 +3431,8 @@ if archivo is not None:
                     with _tabs_detalle[0]:
                         st.dataframe(pd.DataFrame([{
                             "#": f.get("Partida"), "Concepto": f.get("Concepto"), "Fuente": nombre,
-                            "Dictamen": validacion.dictamen_texto(f["_evaluaciones"][clave]),
-                            "Confiabilidad": validacion.confiabilidad_texto(f["_evaluaciones"][clave]),
-                            "Falta confirmar": validacion.falta_confirmar(f["_evaluaciones"][clave], f.get("Concepto")) or "—",
-                            "Observaciones": f["_evaluaciones"][clave]["motivo"],
-                            "Concepto encontrado": f["_evaluaciones"][clave].get("descripcion") or "—",
-                            "P.U. referencia": _dinero(f["_evaluaciones"][clave]["precio_referencia"]),
-                            "Fecha del precio": f["_evaluaciones"][clave].get("fecha") or "—",
-                            "Revisión IA": f["_evaluaciones"][clave].get("revision_ia") or "—",
-                            "Fuente web": f["_evaluaciones"][clave].get("fuente_web") or "—",
-                            "Evidencia web": f["_evaluaciones"][clave].get("evidencia") or "—",
+                            "P.U. referencia": f["_evaluaciones"][clave]["precio_referencia"],
+                            **validacion.evidencia(f["_evaluaciones"][clave], f.get("Concepto")),
                         } for f in filas for clave, nombre in _FUENTES]), use_container_width=True, hide_index=True)
 
                     with _tabs_detalle[1]:
@@ -3438,7 +3489,7 @@ if archivo is not None:
                             "validar*, nunca como ahorro.\n"
                             "- **Rechazada:** la IA la rechaza, o el material, el elemento (p. ej. castillo vs. cerramiento), "
                             "la especificación o el alcance son distintos.\n"
-                            "- **Ahorro respaldado:** solo contra una referencia validada y con el cotizado por encima del ±5 %.\n"
+                            "- **Oportunidad validada:** diferencia contra una referencia validada con el cotizado más de 5 % arriba. Es potencial: el ahorro real es la reducción que se negocie o contrate.\n"
                             "- **Sin promedios:** cada fuente se compara por separado; la referencia de negociación sigue la "
                             "prioridad Histórico Ragasa > Nuevo León > CDMX > IA.\n"
                             "- **Precios web:** la fecha del precio solo se registra si la fuente la indica; aparte se guarda "

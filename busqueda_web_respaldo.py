@@ -84,8 +84,11 @@ def _unidad_canonica(unidad) -> str:
         return str(unidad or "").strip().upper()
 
 
-def consultas_para(descripcion: str, unidad: str) -> list[str]:
-    """1-2 consultas de búsqueda por material + trabajo + unidad."""
+MAX_CONSULTAS = 3
+
+
+def opciones_catalogo(descripcion: str) -> list[str]:
+    """Formas de nombrar el concepto (catálogo y equivalencias de trabajo)."""
     try:
         from comparador_multifuente_v2 import consultas_catalogo, normalize_text
         opciones = consultas_catalogo(normalize_text(descripcion))
@@ -94,17 +97,26 @@ def consultas_para(descripcion: str, unidad: str) -> list[str]:
     # La primera es el texto original (largo y con relleno de obra): se
     # prefieren las versiones de catálogo y las equivalencias de trabajo.
     opciones = [o for o in opciones[1:] if len(o.split()) >= 2] or opciones[:1]
-    u = _UNIDAD_TEXTO.get(_unidad_canonica(unidad), str(unidad or "").lower())
-    vistas, consultas = set(), []
+    vistas, salida = set(), []
     for o in opciones:
         clave = " ".join(sorted(set(o.lower().split()))[:4])
-        if clave in vistas:
-            continue
-        vistas.add(clave)
-        consultas.append(f"precio unitario {o.lower()} por {u} México")
-        if len(consultas) == 2:
-            break
-    return consultas
+        if clave not in vistas:
+            vistas.add(clave)
+            salida.append(o.lower())
+    return salida
+
+
+def consultas_para(descripcion: str, unidad: str) -> list[str]:
+    """Hasta MAX_CONSULTAS búsquedas: primero la región de la cotización
+    (Monterrey / Nuevo León), luego México y luego una forma alternativa
+    del concepto, por si la primera fuente se rechaza."""
+    u = _UNIDAD_TEXTO.get(_unidad_canonica(unidad), str(unidad or "").lower())
+    opciones = opciones_catalogo(descripcion) or [descripcion.lower()]
+    consultas = [f"precio unitario {opciones[0]} por {u} Monterrey Nuevo León"]
+    consultas.append(f"precio unitario {opciones[0]} por {u} México")
+    if len(opciones) > 1:
+        consultas.append(f"tabulador precio unitario {opciones[1]} {u}")
+    return consultas[:MAX_CONSULTAS]
 
 
 # ----------------------------------------------------------------------
@@ -196,17 +208,20 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
                         url: str = "", titulo: str = "", origen: str = "página") -> list[dict]:
     """Referencias (concepto, unidad, precio) encontradas en el texto."""
     from rapidfuzz import fuzz
-    from validacion_referencias import alcance_distinto, elemento_principal, trabajo_principal
+    from validacion_referencias import (alcance_distinto, comparar_especificaciones, elemento_principal,
+                                        extraer_especificaciones, trabajo_principal)
 
     if not texto:
         return []
     u = _unidad_canonica(unidad)
     patron_u = re.compile(_UNIDAD_PATRON.get(u, re.escape(_plano(unidad) or "-")), re.I)
-    consultas = [_plano(c) for c in consultas_para(descripcion, unidad)]
-    consultas = [re.sub(r"^precio unitario | por \S+( \S+)? mexico$", "", c) for c in consultas]
+    consultas = [_plano(c) for c in opciones_catalogo(descripcion)] or [_plano(descripcion)]
     elemento = elemento_principal(descripcion)
     trabajo = trabajo_principal(descripcion)
 
+    muestra = _plano(texto[:30000] + " " + url)
+    region = ("Nuevo León" if re.search(r"nuevo leon|monterrey|\.nl\.gob|nl\.gob", muestra) else
+              "CDMX" if re.search(r"ciudad de mexico|cdmx", muestra) else "México")
     lineas = [re.sub(r"\s+", " ", l).strip() for l in texto.splitlines()]
     lineas = [l for l in lineas if l]
     salida = []
@@ -263,6 +278,13 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
             continue
         if alcance_distinto(descripcion, contexto):
             continue
+        # Especificación distinta (otra sección, f'c, calibre) o precio por
+        # pieza de un tamaño que la partida no declara: se busca otra fuente.
+        if comparar_especificaciones(descripcion, contexto)[1]:
+            continue
+        if u == "PZA" and extraer_especificaciones(contexto).get("sección / medidas") and not \
+                extraer_especificaciones(descripcion).get("sección / medidas"):
+            continue
         similitud = max((fuzz.token_set_ratio(c, ctx) for c in consultas), default=0)
         if similitud < UMBRAL_TEXTO:
             continue
@@ -285,6 +307,7 @@ def extraer_referencias(texto: str, *, descripcion: str, unidad: str, precio_cot
                 "unidad_en_renglon": bool(patron_u.search(_plano(linea))),
                 "anio": anio,
                 "origen": origen,
+                "region": region,
             })
             break
     return salida
@@ -358,7 +381,10 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
 
     for r in referencias:
         r["confiabilidad"] = _confiabilidad(r)
-    referencias.sort(key=lambda r: (r["confiabilidad"] == "MEDIA", r["similitud"], r["anio"] or ""), reverse=True)
+    # Prioridad: leído en el documento completo, documento oficial (.gob.mx),
+    # región de la cotización, semejanza del concepto y año más reciente.
+    referencias.sort(key=lambda r: (r["confiabilidad"] == "MEDIA", ".gob" in r["url"].lower(),
+                                    r["region"] == "Nuevo León", r["similitud"], r["anio"] or ""), reverse=True)
     mejor = referencias[0]
     otras = [r for r in referencias[1:] if r["url"] != mejor["url"]][:3]
     return {
@@ -371,6 +397,8 @@ def investigar_partida(item: dict, *, buscar, leer=leer_pagina, tiempo_max=TIEMP
         "fuente_nombre": mejor["titulo"] or mejor["url"],
         "fuente_url": mejor["url"],
         "fecha_fuente": mejor["anio"],
+        "origen": mejor["origen"],
+        "region": mejor["region"],
         "fragmento": mejor["concepto"],
         "nota": (f"Precio leído en el {mejor['origen']} (concepto, unidad y precio en el mismo renglón); "
                  f"similitud de concepto {mejor['similitud']:.0f}/100. Orientativo: falta confirmar "

@@ -76,6 +76,14 @@ COLUMNAS_OPCIONALES = ['resultado_final', 'diferencia_pct']
 NUM_RE = re.compile(r'\d+(?:\.\d+)?')
 
 
+def _es_numero(v) -> bool:
+    try:
+        float(v)
+        return v == v
+    except (TypeError, ValueError):
+        return False
+
+
 def numeric_signature(t: str):
     nums = NUM_RE.findall(t)
     return tuple(sorted(round(float(n), 1) for n in nums))
@@ -196,23 +204,39 @@ class HistoricoGoogleSheets:
         nuevo['fecha_carga'] = datetime.now().strftime('%Y-%m-%d')
 
         filas_nuevas = []
+        existentes = set()
+        if not self.df.empty:
+            existentes = {
+                (str(a), str(b), str(c), str(d), round(float(e or 0), 2))
+                for a, b, c, d, e in self.df[['proyecto', 'proveedor', 'concepto_norm', 'unidad_norm',
+                                              'precio_unitario']].itertuples(index=False)
+                if _es_numero(e)
+            }
         for _, r in nuevo.iterrows():
+            llave = (str(proyecto), str(proveedor), str(r['concepto_norm']), str(r['unidad_norm']),
+                     round(float(r['precio_unitario'] or 0), 2) if _es_numero(r['precio_unitario']) else None)
+            if llave in existentes:
+                continue   # ya estaba guardada: no se duplica
+            existentes.add(llave)
             cid = self._homologar_uno(r['concepto_norm'], r['unidad_norm'])
             fila = {**r.to_dict(), 'cluster_id': cid}
             self.df = pd.concat([self.df, pd.DataFrame([fila])[COLUMNAS]], ignore_index=True)
             filas_nuevas.append([_to_native(fila[c]) for c in COLUMNAS])
 
         # escribe solo las filas nuevas al final de la hoja (rapido, no reescribe todo)
-        self.sheet.append_rows(filas_nuevas, value_input_option="USER_ENTERED")
-
-        nuevo['cluster_id'] = [f[-1] for f in filas_nuevas]
-        return nuevo[COLUMNAS]
+        if filas_nuevas:
+            self.sheet.append_rows(filas_nuevas, value_input_option="USER_ENTERED")
+        return pd.DataFrame(filas_nuevas, columns=COLUMNAS)
 
     def consultar(self, descripcion: str, unidad: str, precio_cotizado: float = None,
-                  min_score: float = 78.0, usar_ia: bool = False) -> dict:
+                  min_score: float = 78.0, usar_ia: bool = False, excluir=None) -> dict:
+        """excluir=(proveedor, proyecto): no compara la cotización contra sí misma."""
         t = normalize_text(descripcion)
         u = normalize_unit(unidad)
         pool = self.df[self.df['unidad_norm'] == u]
+        if excluir and all(excluir) and not pool.empty:
+            pool = pool[~((pool['proveedor'].astype(str) == str(excluir[0]))
+                          & (pool['proyecto'].astype(str) == str(excluir[1])))]
         if pool.empty:
             return {'match': None, 'motivo': f'historico vacio o sin unidad {u} todavia'}
 
