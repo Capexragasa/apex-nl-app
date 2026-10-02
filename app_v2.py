@@ -74,6 +74,7 @@ DEFAULT_SHEET_ID = (
 st.title("Revisor de cotizaciones CAPEX - Nuevo León")
 
 st.caption(
+    "Desarrollado por José Carlos Pérez Fajardo Ragasa, Saludillos"
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
