@@ -74,14 +74,13 @@ DEFAULT_SHEET_ID = (
 st.title("Revisor de cotizaciones CAPEX - Nuevo León")
 
 st.caption(
-    "Desarrollado por José Carlos Pérez Fajardo Compras Ragasa · Saludillos"
-)
-
-
-st.caption(
     "La base de precios de Nuevo León, CDMX y el histórico interno "
     "ya están integrados. Sube tu cotización o licitación."
 )
+st.caption(
+    "Jose Carlos W/H "
+)
+
 import version as _version
 st.caption(f"Versión {_version.VERSION} · actualizada {_version.FECHA}")
 
