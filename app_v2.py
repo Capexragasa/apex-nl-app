@@ -78,7 +78,7 @@ st.caption(
     "ya están integrados. Sube tu cotización o licitación."
 )
 st.caption(
-    "Jose Carlos W/H "
+    "Desarrollador: Jose Carlos "
 )
 
 import version as _version
