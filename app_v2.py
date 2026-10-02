@@ -74,7 +74,7 @@ DEFAULT_SHEET_ID = (
 st.title("Revisor de cotizaciones CAPEX - Nuevo León")
 
 st.caption(
-    "Desarrollado por José Carlos Pérez Fajardo · Compras CAPEX · Ragasa"
+    "Desarrollado por José Carlos Pérez Fajardo Compras Ragasa · Saludillos"
 )
 
 
